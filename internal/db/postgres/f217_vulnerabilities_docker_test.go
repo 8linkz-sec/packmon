@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/8linkz-sec/packmon/internal/db"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -83,18 +82,14 @@ func TestF217VulnerabilityWriteAtomicityOwnershipAndCacheInvalidation(t *testing
 	now := time.Now().UTC()
 	generation := dashboardStatsCacheGeneration(store)
 
-	t.Run("known null-element validator gap is rejected atomically by PostgreSQL", func(t *testing.T) {
+	t.Run("null element is rejected atomically at the store boundary", func(t *testing.T) {
 		vuln := f217CompleteVulnerability()
 		vuln.ID = "GHSA-F217-NULL-DB"
 		vuln.Sources[0].SourceID = vuln.ID
 		vuln.AffectedPackages[0].VersionsAffected = json.RawMessage(`["1.0.0",null]`)
 		err := store.UpsertVulnerability(ctx, vuln)
-		if err == nil {
-			t.Fatal("UpsertVulnerability(null array element) error = nil, want PostgreSQL CHECK rejection")
-		}
-		var pgErr *pgconn.PgError
-		if !errors.As(err, &pgErr) || pgErr.Code != "23514" {
-			t.Fatalf("UpsertVulnerability(null array element) error = %v, want SQLSTATE 23514", err)
+		if !errors.Is(err, db.ErrInvalidFeedImportData) || !strings.Contains(err.Error(), vuln.ID+" versions_affected") {
+			t.Fatalf("UpsertVulnerability(null array element) error = %v, want invalid feed data with ID and field", err)
 		}
 		f217AssertVulnerabilityAbsent(t, store, vuln.ID)
 		if got := dashboardStatsCacheGeneration(store); got != generation {

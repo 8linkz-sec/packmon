@@ -89,11 +89,8 @@ func TestF217KnownBugStringArrayValidatorRejectsNullElements(t *testing.T) {
 		json.RawMessage(`["1.0.0",null]`),
 		false,
 	)
-	if err == nil {
-		t.Skip("F217-bugs-1: validateStoredStringArrayJSON accepts a null array element as an empty Go string")
-	}
-	if !strings.Contains(err.Error(), "GHSA-F217-NULL-ELEMENT versions_affected") {
-		t.Fatalf("validateStoredStringArrayJSON(null element) error = %v, want ID and field", err)
+	if !errors.Is(err, db.ErrInvalidFeedImportData) || !strings.Contains(err.Error(), "GHSA-F217-NULL-ELEMENT versions_affected") {
+		t.Fatalf("validateStoredStringArrayJSON(null element) error = %v, want invalid feed data with ID and field", err)
 	}
 }
 
@@ -200,6 +197,9 @@ func TestF217UpsertVulnerabilityTxRejectsBeforeAffectedWrite(t *testing.T) {
 		{name: "ecosystem", edit: func(v *db.Vulnerability) { v.AffectedPackages[0].Ecosystem = "unknown" }, want: "unsupported ecosystem"},
 		{name: "version ranges", edit: func(v *db.Vulnerability) { v.AffectedPackages[0].VersionRanges = json.RawMessage(`{}`) }, want: "version_ranges"},
 		{name: "affected versions", edit: func(v *db.Vulnerability) { v.AffectedPackages[0].VersionsAffected = json.RawMessage(`[1]`) }, want: "versions_affected"},
+		{name: "affected versions null element", edit: func(v *db.Vulnerability) {
+			v.AffectedPackages[0].VersionsAffected = json.RawMessage(`["1.0.0",null]`)
+		}, want: "versions_affected"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

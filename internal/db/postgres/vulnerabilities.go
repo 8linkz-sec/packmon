@@ -60,9 +60,14 @@ func validateStoredStringArrayJSON(id, field string, raw json.RawMessage, allowN
 		}
 		return invalidFeedImportDataf("%s %s must be an array of strings", id, field)
 	}
-	var values []string
+	var values []*string
 	if err := json.Unmarshal(raw, &values); err != nil {
 		return invalidFeedImportDataf("%s %s must be an array of strings: %v", id, field, err)
+	}
+	for _, value := range values {
+		if value == nil {
+			return invalidFeedImportDataf("%s %s must be an array of strings", id, field)
+		}
 	}
 	return nil
 }
