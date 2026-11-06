@@ -1143,6 +1143,12 @@ Git hooks:
 - apart from writing the managed hook file, neither `packmon hook install` nor
   a hook run writes repository data, generated files, lockfiles,
   configuration, or Git metadata;
+- install uses `Lstat` on the final hook entry and rejects live and dangling
+  symbolic links with a path-free operational diagnostic before reading the
+  managed marker, writing the hook, or changing its mode. It neither opens nor
+  mutates the referent. Git-resolved external hooks directories and symlinks in
+  their parent layout remain supported; this check applies only to the final
+  hook entry;
 - the managed hook runs `packmon scan --hook`. A destination that resolves
   (relative to the repository working directory, through symlinks including
   dangling ones, and by file identity of its deepest existing ancestor so

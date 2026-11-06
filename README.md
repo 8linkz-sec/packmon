@@ -978,13 +978,15 @@ be combined with `--list-packages`, `--outdated`, `--list-all`, or
 updates them. See "Troubleshooting" in `docs/runbook.md` for a hook that exits
 with code `2`.
 
-`install` refuses to overwrite an existing hook that packmon did not create;
-`uninstall` only removes packmon-managed hooks. Every `install` (also an update
-of an existing packmon hook) leaves the hook executable (mode `0755`), and
-`status` reports a packmon hook that lost its execute bit as `not executable`,
-because Git skips such a hook. Supported types: `pre-push` (default) and
-`pre-commit`. The hook type and fail-on threshold can also be set under a
-`hook:` block in `.packmon.yaml`.
+`install` refuses to overwrite an existing hook that packmon did not create.
+It also refuses a live or dangling symbolic link at the final hook path without
+reading or changing its target; Git may still resolve the hooks directory
+outside the work tree. `uninstall` only removes packmon-managed hooks. Every
+`install` (also an update of an existing packmon hook) leaves the hook executable
+(mode `0755`), and `status` reports a packmon hook that lost its execute bit as
+`not executable`, because Git skips such a hook. Supported types: `pre-push`
+(default) and `pre-commit`. The hook type and fail-on threshold can also be set
+under a `hook:` block in `.packmon.yaml`.
 
 ## Server Configuration
 
