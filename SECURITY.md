@@ -480,6 +480,15 @@ Production API behavior must enforce:
 - bounded request body parsing;
 - server timeouts for read, write, and shutdown.
 
+The bundled Compose models pass the same resolved
+`PACKMON_SERVER_STOP_GRACE_PERIOD` to the server and Docker's
+`stop_grace_period`. When that optional value is present, startup requires it
+to cover `PACKMON_SERVER_SHUTDOWN_TIMEOUT` plus the five-second hard-exit
+buffer, so the resolved bundled model does not schedule Docker's SIGKILL before
+the supported graceful-shutdown window ends. The production Compose file sets
+both values in the explicit service environment, which takes precedence over
+`env_file`.
+
 Limits are configuration-driven, and selected values may be persisted through
 admin system settings.
 

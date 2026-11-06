@@ -87,6 +87,8 @@ services:
       # in-container listener can never diverge from the mapped container port
       # (a shell override would otherwise map 8181:8181 onto a listener on 8080).
       PACKMON_SERVER_PORT: ${PACKMON_SERVER_PORT:-8080}
+      PACKMON_SERVER_SHUTDOWN_TIMEOUT: ${PACKMON_SERVER_SHUTDOWN_TIMEOUT:-15s}
+      PACKMON_SERVER_STOP_GRACE_PERIOD: ${PACKMON_SERVER_STOP_GRACE_PERIOD:-25s}
       # Pinned to the feed-data volume mount below; an env_file value pointing
       # elsewhere would put the git-backed feed checkouts on ephemeral storage.
       PACKMON_FEED_DATA_DIR: /data/feeds
@@ -121,7 +123,7 @@ services:
           cpus: '2.0'
         reservations:
           memory: 256M
-    stop_grace_period: 25s
+    stop_grace_period: ${PACKMON_SERVER_STOP_GRACE_PERIOD:-25s}
     restart: unless-stopped
 
   packmon-migrate:

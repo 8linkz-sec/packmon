@@ -201,7 +201,14 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   `packmon-backup` jobs use `restart: "no"`, and passes the same
   `PACKMON_SERVER_PORT` expression into the container that it uses for both
   sides of the loopback port mapping, so the published container port and the
-  in-container listener cannot diverge.
+  in-container listener cannot diverge. Both Compose models likewise resolve
+  `PACKMON_SERVER_STOP_GRACE_PERIOD` once for the server container environment
+  and `stop_grace_period`; the production model also resolves
+  `PACKMON_SERVER_SHUTDOWN_TIMEOUT` explicitly instead of accepting a
+  conflicting service `env_file` value. Server startup rejects a configured
+  stop grace that is less than the shutdown timeout plus the five-second
+  hard-exit buffer. The stop-grace variable is optional outside these Compose
+  models.
 - In both Compose models the server's feed working directory
   (`PACKMON_FEED_DATA_DIR`, `/data/feeds` in the container; the production file
   pins this value) is backed by the named `feed-data` volume

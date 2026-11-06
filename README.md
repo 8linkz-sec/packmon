@@ -1011,6 +1011,9 @@ Important environment variables:
 - `PACKMON_TRUSTED_PROXIES=10.0.0.0/8,192.168.10.10` (valid IP addresses or CIDR prefixes)
 - `PACKMON_SERVER_READ_TIMEOUT=30s`, `PACKMON_SERVER_WRITE_TIMEOUT=30s`,
   `PACKMON_SERVER_SHUTDOWN_TIMEOUT=5s`
+- `PACKMON_SERVER_STOP_GRACE_PERIOD` (optional outside Compose; both bundled
+  Compose models default it to `25s` and require it to be at least the shutdown
+  timeout plus `5s`)
 - `PACKMON_BLOCK_THRESHOLD=CRITICAL`
 - `PACKMON_RATE_LIMIT_PER_MINUTE=60`
 - `PACKMON_RATE_LIMIT_BURST=60`

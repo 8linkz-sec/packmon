@@ -25,6 +25,11 @@
   the identified document root with a generic, content-free parse error and no
   partial package rows. Trailing whitespace, text inside the root, and trailing
   text on unrelated config files remain accepted as before.
+- Custom Compose shutdown timeouts can no longer outlast Docker's server stop
+  grace. Both Compose models now resolve one stop-grace value for Docker and
+  the container, the production model pins the shutdown timeout in the same
+  explicit environment layer, and startup rejects a grace shorter than the
+  shutdown timeout plus the five-second hard-exit buffer.
 - Chocolatey inventory discovery warnings no longer expose the absolute scan
   root and candidate path if an injected or future Windows walker callback
   supplies a file on another volume. The candidate is still rejected, later
