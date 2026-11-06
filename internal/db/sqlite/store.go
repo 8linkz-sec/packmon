@@ -942,9 +942,14 @@ func validateLocalStringArray(id, field, versionsJSON string, allowNull bool) er
 		}
 		return fmt.Errorf("sqlite: finding %s %s must be an array of strings", id, field)
 	}
-	var values []string
+	var values []any
 	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
 		return fmt.Errorf("sqlite: finding %s %s must be an array of strings: %w", id, field, err)
+	}
+	for _, value := range values {
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("sqlite: finding %s %s must be an array of strings", id, field)
+		}
 	}
 	return nil
 }
