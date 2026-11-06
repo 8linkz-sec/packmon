@@ -1324,13 +1324,34 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// The password and its audit are committed. From this point until a valid
+	// exclusive replacement session exists, any error or panic must fail closed
+	// by invalidating every admin session. Pre-auth login sessions are retained.
+	sessionRotationComplete := false
+	sessionsInvalidated := false
+	invalidateAdminSessions := func() {
+		if sessionsInvalidated {
+			return
+		}
+		h.sm.DeleteAllAdminSessions(w)
+		sessionsInvalidated = true
+	}
+	defer func() {
+		if !sessionRotationComplete {
+			invalidateAdminSessions()
+		}
+	}()
+
 	h.resetAttempts(ip)
 
-	if _, err := h.sm.CreateExclusiveAdmin(w); err != nil {
+	replacement, err := h.newExclusiveAdminSession(w)
+	if err != nil || replacement == nil {
+		invalidateAdminSessions()
 		h.logger.Error("admin settings: failed to rotate admin session", h.adminLogAttrs(r, "error", err)...)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
+	sessionRotationComplete = true
 
 	http.Redirect(w, r, "/admin/settings?msg="+url.QueryEscape(web.Message("admin.settings.flash.password_changed")), http.StatusSeeOther)
 }

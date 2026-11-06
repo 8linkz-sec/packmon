@@ -807,10 +807,15 @@ admin passwords, and manual advisories commit the state
 change and required audit row in one transaction. Password changes are
 compare-and-swap updates against the bcrypt hash that the handler just
 verified, so a concurrent rotation cannot be overwritten by a stale
-current-password check. Admin-auth mutations that also append audit rows use a
-consistent `admin_auth` then `admin_audit_log` lock order. Destructive refresh-queue
-clear/purge actions preserve a bounded sample of deleted job identities in
-audit details from the delete operation, including job ID, package coordinate,
+current-password check. Exclusive in-memory session replacement follows that
+commit as a compensated, fail-closed step rather than as part of the database
+transaction. If replacement fails or panics, the new password remains
+committed while every admin session and both current and legacy cookies are
+invalidated, requiring a fresh login with the new password. Admin-auth
+mutations that also append audit rows use a consistent `admin_auth` then
+`admin_audit_log` lock order. Destructive refresh-queue clear/purge actions
+preserve a bounded sample of deleted job identities in audit details from the
+delete operation, including job ID, package coordinate,
 source, priority, prior status, timestamps, redacted bounded error text,
 `total_deleted`, `sample_count`, and `truncated`. The per-job `requested_at`
 and `processed_at` values are RFC 3339 UTC timestamps; a job without one (for

@@ -353,7 +353,12 @@ Admin properties:
   changes, queue mutations, password changes, and manual advisory writes
   atomically with their audit rows. Password changes use a compare-and-swap
   predicate against the previously verified bcrypt hash, and admin-auth/audit
-  mutations acquire locks in `admin_auth` then `admin_audit_log` order.
+  mutations acquire locks in `admin_auth` then `admin_audit_log` order. The
+  exclusive in-memory session replacement follows the password/audit commit as
+  a compensated, fail-closed step: if replacement fails or panics, the new
+  password remains committed while every admin session and both current and
+  legacy cookies are invalidated, requiring a fresh login with the new
+  password.
   Refresh-queue clear/purge audit rows must
   preserve an affected-job sample with job IDs, package coordinates, sources,
   priorities, prior statuses, timestamps (a timestamp the job never had is
