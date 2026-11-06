@@ -226,6 +226,39 @@ paths:
                     feed_versions:
                       osv: "2026-01-15T10:00:00Z"
                     manual_advisories_count: 0
+                malwareHistoryInformational:
+                  summary: Informational historical malware reputation finding
+                  value:
+                    scan_id: scan_01K9BTJ8BKQ3YQ9G3TW2TQQ76W
+                    mode: remote
+                    scanned_at: "2026-11-06T12:00:00Z"
+                    duration_ms: 37
+                    packages_scanned: 1
+                    findings_count: 1
+                    findings_blocking: false
+                    block_threshold: HIGH
+                    feed_status: healthy
+                    db_age_days: null
+                    db_stale: false
+                    summary:
+                      by_severity:
+                        LOW: 1
+                      by_type:
+                        supply_chain_risk: 1
+                      by_source:
+                        reversinglabs: 1
+                    findings:
+                      - ecosystem: npm
+                        name: historical-example
+                        version: 1.2.3
+                        type: supply_chain_risk
+                        severity: LOW
+                        title: Historical malware reputation
+                        risk_type: malware_history
+                        source: reversinglabs
+                    feed_versions:
+                      reversinglabs: "2026-11-06T10:00:00Z"
+                    manual_advisories_count: 0
         "400":
           description: Invalid request (malformed JSON, too many packages)
           headers: *apiCommonResponseHeaders
@@ -1776,7 +1809,10 @@ components:
             - eol_soon
             - security_support_only
             - other
-          description: "Threat or supply-chain risk category"
+          description: >-
+            Threat or supply-chain risk category. malware_history is historical
+            reputation context: it is informational, forced to LOW, and never
+            blocks a scan.
         source:
           type: string
           description: "Feed source: osv, ghsa, vulncheck, openssf, socket, reversinglabs, endoflife.date, manual"
