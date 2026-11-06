@@ -178,31 +178,36 @@ func TestParseConfigXMLRejectsNonWhitespaceAfterRoot(t *testing.T) {
 	t.Parallel()
 
 	for _, tt := range []struct {
-		name  string
-		doc   string
-		bugID string
+		name       string
+		doc        string
+		openBugID  string
+		secretText string
 	}{
 		{
-			name:  "second root",
-			doc:   `<config><packages><package name="partial"/></packages></config><other/>`,
-			bugID: "F085-bugs-2",
+			name:       "second root",
+			doc:        `<config><packages><package name="partial"/></packages></config><other token="second-root-secret"/>`,
+			secretText: "second-root-secret",
 		},
 		{
-			name:  "trailing text",
-			doc:   `<config><packages><package name="partial"/></packages></config>trailing-junk`,
-			bugID: "F085-bugs-3",
+			name:       "trailing text",
+			doc:        `<config><packages><package name="partial"/></packages></config>trailing-junk`,
+			openBugID:  "F085-bugs-3",
+			secretText: "trailing-junk",
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			packages, err := ParseConfigXML(strings.NewReader(tt.doc), "config.xml")
 			if err == nil {
-				t.Skip(tt.bugID + ": ParseConfigXML accepts non-whitespace content after the root element")
+				if tt.openBugID != "" {
+					t.Skip(tt.openBugID + ": ParseConfigXML accepts non-whitespace content after the root element")
+				}
+				t.Fatal("ParseConfigXML() error = nil, want generic malformed-document error")
 			}
 			if packages != nil {
 				t.Fatalf("ParseConfigXML() packages = %+v, want nil on malformed document", packages)
 			}
-			if got := err.Error(); got != "config.xml: invalid config.xml package list" || strings.Contains(got, "partial") || strings.Contains(got, "trailing-junk") {
+			if got := err.Error(); got != "config.xml: invalid config.xml package list" || strings.Contains(got, "partial") || strings.Contains(got, tt.secretText) {
 				t.Fatalf("ParseConfigXML() error = %q, want generic content-free error", got)
 			}
 		})
