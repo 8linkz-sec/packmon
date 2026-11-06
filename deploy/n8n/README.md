@@ -1,6 +1,48 @@
 # n8n Workflows
 
-The example workflows in this directory are disabled by default and expect environment variables to be injected by n8n.
+The example workflows in this directory are disabled by default. They are
+operator-supplied starting points, not a Packmon-managed n8n service.
+
+## Supported command runtime
+
+`daily-sync.json` and `on-demand-scan.json` use Execute Command because they
+run the local Packmon CLI. n8n 2.x disables that node by default. The supported
+self-hosted runtime contract is stored in `command-runtime.json` and currently
+pins:
+
+```text
+docker.io/n8nio/n8n:2.46.6@sha256:8602f5dfacbe2c931eeafd010de0e68182310e9f309921e780ab69182e92b3ae
+NODES_EXCLUDE=["n8n-nodes-base.localFileTrigger"]
+N8N_BLOCK_ENV_ACCESS_IN_NODE=true
+```
+
+Apply both environment settings to every n8n main, worker, and webhook process
+that loads or executes these workflows. The exclusion list deliberately removes
+only Execute Command from n8n 2.x's two default exclusions; Local File Trigger
+stays disabled. `NODES_EXCLUDE=[]` is not supported. n8n Cloud does not provide
+Execute Command. When upgrading n8n, update the reviewed image in
+`command-runtime.json` and rerun the static and Docker runtime contract tests
+before activation.
+
+Enabling Execute Command gives a workflow author arbitrary shell execution as
+the n8n operating-system user. Use a dedicated non-root n8n instance and workers
+whose editors and workflow importers are fully trusted. Do not mount the Docker
+socket, host root, or unrelated secrets. Mount the Packmon binary, helper, and
+scan inputs read-only; provide only a dedicated writable n8n state/database area;
+and restrict egress to required internal destinations. Keep the templates
+disabled until the runtime, mounts, credentials, and network policy have been
+reviewed.
+
+`N8N_BLOCK_ENV_ACCESS_IN_NODE=true` blocks environment access from n8n
+expressions and Code nodes. It does not remove variables inherited by a child
+process launched through Execute Command. Anyone allowed to edit or import a
+command workflow must therefore be trusted with every environment value and
+file visible to its executor.
+
+## Workflow variables
+
+The templates expect their required environment variables to be injected by
+n8n.
 
 Recommended variables:
 
