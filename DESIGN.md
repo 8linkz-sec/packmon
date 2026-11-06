@@ -406,7 +406,10 @@ Important behavior:
   live or dangling symbolic link at the final hook entry before reading its
   managed marker, writing it, or changing its mode. The link and its referent
   stay unchanged; regular managed hooks are updated and regular custom hooks
-  keep the existing refusal behavior.
+  keep the existing refusal behavior. Uninstall treats only a missing hook
+  entry as absent; any other inspection failure exits operationally before
+  reading the marker. Inspection and removal failures never report a skip,
+  absence, or successful removal for that entry.
 - Timeouts (`--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and
   `repos[].timeout`) are whole seconds from 1 through 9223372036, the largest
   value that fits a Go `time.Duration`. `scan`, `config show`, and `db sync`

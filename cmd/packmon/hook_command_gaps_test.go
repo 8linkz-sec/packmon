@@ -411,29 +411,20 @@ func TestHookUninstallReportsStatFailure(t *testing.T) {
 	}
 	assertHookFileState(t, hookPath, wantData, before.Mode())
 
-	if exitCode == ExitOperational {
-		if !strings.Contains(output, "Error:") || !strings.Contains(output, "pre-push hook") {
-			t.Fatalf("hook uninstall stat failure output = %q, want operational pre-push diagnostic", output)
-		}
-		for _, forbidden := range []string{
-			"Skipping pre-push: not a packmon-managed hook.",
-			"Skipping pre-commit: not a packmon-managed hook.",
-			"No packmon-managed hooks found.",
-			"Removed packmon",
-		} {
-			if strings.Contains(output, forbidden) {
-				t.Fatalf("hook uninstall stat failure output = %q, must not contain %q", output, forbidden)
-			}
-		}
-		return
+	const wantOutput = "Error: cannot inspect pre-push hook.\n"
+	if exitCode != ExitOperational || output != wantOutput {
+		t.Fatalf("hook uninstall stat failure result = exit %d, output %q; want exit %d, output %q", exitCode, output, ExitOperational, wantOutput)
 	}
-	const currentMisleadingOutput = "Skipping pre-push: not a packmon-managed hook.\n" +
-		"Skipping pre-commit: not a packmon-managed hook.\n" +
-		"No packmon-managed hooks found.\n"
-	if exitCode == 0 && output == currentMisleadingOutput {
-		t.Skip("[F029-bugs-3] hook uninstall treats non-ENOENT stat failures as custom/missing hooks and exits successfully")
+	for _, forbidden := range []string{
+		"Skipping pre-push: not a packmon-managed hook.",
+		"Skipping pre-commit: not a packmon-managed hook.",
+		"No packmon-managed hooks found.",
+		"Removed packmon",
+	} {
+		if strings.Contains(output, forbidden) {
+			t.Fatalf("hook uninstall stat failure output = %q, must not contain %q", output, forbidden)
+		}
 	}
-	t.Fatalf("unexpected hook uninstall stat-failure result: exit=%d output=%q", exitCode, output)
 }
 
 func TestHookInstallExitHelper(t *testing.T) {
