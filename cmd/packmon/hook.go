@@ -191,8 +191,17 @@ func newHookInstallCmd() *cobra.Command {
 			hooksDir := findGitHooksDir(root)
 			hookPath := filepath.Join(hooksDir, hookType)
 
-			// Check if hook already exists.
-			if _, err := os.Stat(hookPath); err == nil {
+			// Inspect the final hook entry without following it. A live or
+			// dangling symlink must be rejected before marker reads, writes, or
+			// chmod can reach a referent outside the Git hooks directory.
+			hookInfo, hookInfoErr := os.Lstat(hookPath)
+			if hookInfoErr == nil && hookInfo.Mode()&os.ModeSymlink != 0 {
+				fmt.Fprintln(os.Stderr, "Error: refusing to install hook because the hook path is a symbolic link.")
+				os.Exit(ExitOperational)
+			}
+
+			// Check if a regular hook already exists.
+			if hookInfoErr == nil {
 				if !isPackmonHook(hookPath) {
 					fmt.Fprintf(os.Stderr, "Warning: %s hook already exists and is not managed by packmon.\n", hookType)
 					fmt.Fprintf(os.Stderr, "Remove it manually or back it up before installing the packmon hook.\n")

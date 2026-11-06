@@ -401,7 +401,12 @@ Important behavior:
   after the skip. `--hook` cannot be combined with `--list-packages`,
   `--outdated`, `--list-all`, or `--auto-sbom`.
   `packmon hook status` reports a managed hook without `--hook` (installed by
-  an older version) as outdated; `packmon hook install` rewrites it.
+  an older version) as outdated; `packmon hook install` rewrites it. Git may
+  resolve the hooks directory outside the work tree, but install refuses a
+  live or dangling symbolic link at the final hook entry before reading its
+  managed marker, writing it, or changing its mode. The link and its referent
+  stay unchanged; regular managed hooks are updated and regular custom hooks
+  keep the existing refusal behavior.
 - Timeouts (`--timeout`, `PACKMON_TIMEOUT`, config `timeout`, and
   `repos[].timeout`) are whole seconds from 1 through 9223372036, the largest
   value that fits a Go `time.Duration`. `scan`, `config show`, and `db sync`

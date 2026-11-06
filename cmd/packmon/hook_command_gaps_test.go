@@ -230,10 +230,6 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 	})
 
 	t.Run("existing_managed_symlink", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("managed-hook symlink behavior is covered on POSIX filesystems")
-		}
-
 		root := t.TempDir()
 		hooksDir := filepath.Join(root, ".git", "hooks")
 		if err := os.MkdirAll(hooksDir, 0o750); err != nil {
@@ -250,7 +246,7 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 		}
 		hookPath := filepath.Join(hooksDir, "pre-push")
 		if err := os.Symlink(externalPath, hookPath); err != nil {
-			t.Fatalf("create managed-hook symlink: %v", err)
+			skipOrFailSymlink(t, err)
 		}
 		assertHookSymlinkTarget(t, hookPath, externalPath)
 
@@ -264,27 +260,21 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 		if statErr != nil {
 			t.Fatalf("stat external managed hook after install: %v", statErr)
 		}
-		currentSuccessOutput := "Installed packmon pre-push hook in " + hookPath + "\n"
-		currentInstalledData := []byte(hookScript("CRITICAL"))
-
-		if exitCode == ExitOperational {
-			if strings.Contains(output, "Installed packmon") || string(gotData) != string(wantData) || after.Mode() != before.Mode() {
-				t.Fatalf("rejected symlink changed external hook: output=%q data=%q mode=%v, want data=%q mode=%v", output, gotData, after.Mode(), wantData, before.Mode())
+		const wantDiagnostic = "Error: refusing to install hook because the hook path is a symbolic link.\n"
+		if exitCode != ExitOperational || output != wantDiagnostic {
+			t.Fatalf("managed-hook symlink result = exit %d, output %q; want exit %d, output %q", exitCode, output, ExitOperational, wantDiagnostic)
+		}
+		for _, forbidden := range []string{"Installed packmon", hookPath, externalPath} {
+			if strings.Contains(output, forbidden) {
+				t.Fatalf("managed-hook symlink output %q contains forbidden value %q", output, forbidden)
 			}
-			return
 		}
-		if exitCode == 0 && output == currentSuccessOutput &&
-			bytes.Equal(gotData, currentInstalledData) && after.Mode() == managedHookMode {
-			t.Skip("[F029-bugs-2] hook install follows an existing managed-hook symlink and overwrites/chmods its external target")
+		if string(gotData) != string(wantData) || after.Mode() != before.Mode() {
+			t.Fatalf("rejected symlink changed external hook: data=%q mode=%v, want data=%q mode=%v", gotData, after.Mode(), wantData, before.Mode())
 		}
-		t.Fatalf("unexpected managed-hook symlink result: exit=%d output=%q data=%q mode=%v", exitCode, output, gotData, after.Mode())
 	})
 
 	t.Run("dangling_hook_symlink", func(t *testing.T) {
-		if runtime.GOOS == "windows" {
-			t.Skip("managed-hook symlink behavior is covered on POSIX filesystems")
-		}
-
 		root := t.TempDir()
 		hooksDir := filepath.Join(root, ".git", "hooks")
 		if err := os.MkdirAll(hooksDir, 0o750); err != nil {
@@ -293,7 +283,7 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 		externalPath := filepath.Join(t.TempDir(), "created-through-dangling-link")
 		hookPath := filepath.Join(hooksDir, "pre-push")
 		if err := os.Symlink(externalPath, hookPath); err != nil {
-			t.Fatalf("create dangling hook symlink: %v", err)
+			skipOrFailSymlink(t, err)
 		}
 		assertHookSymlinkTarget(t, hookPath, externalPath)
 		if _, err := os.Stat(externalPath); !os.IsNotExist(err) {
@@ -302,27 +292,18 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 
 		output, exitCode := runHookExitHelper(t, root, "install", "")
 		assertHookSymlinkTarget(t, hookPath, externalPath)
-		data, readErr := os.ReadFile(externalPath) // #nosec G304 -- test reads its fixed fixture path.
-		if exitCode == ExitOperational {
-			if !os.IsNotExist(readErr) || strings.Contains(output, "Installed packmon") {
-				t.Fatalf("rejected dangling symlink created external target: output=%q read error=%v data=%q", output, readErr, data)
+		if _, err := os.Stat(externalPath); !os.IsNotExist(err) {
+			t.Fatalf("rejected dangling symlink created external target: %v", err)
+		}
+		const wantDiagnostic = "Error: refusing to install hook because the hook path is a symbolic link.\n"
+		if exitCode != ExitOperational || output != wantDiagnostic {
+			t.Fatalf("dangling hook symlink result = exit %d, output %q; want exit %d, output %q", exitCode, output, ExitOperational, wantDiagnostic)
+		}
+		for _, forbidden := range []string{"Installed packmon", hookPath, externalPath} {
+			if strings.Contains(output, forbidden) {
+				t.Fatalf("dangling hook symlink output %q contains forbidden value %q", output, forbidden)
 			}
-			return
 		}
-		if readErr != nil {
-			t.Fatalf("read external dangling-link target after install: %v", readErr)
-		}
-		info, statErr := os.Stat(externalPath)
-		if statErr != nil {
-			t.Fatalf("stat external dangling-link target after install: %v", statErr)
-		}
-		currentSuccessOutput := "Installed packmon pre-push hook in " + hookPath + "\n"
-		currentInstalledData := []byte(hookScript("CRITICAL"))
-		if exitCode == 0 && output == currentSuccessOutput &&
-			bytes.Equal(data, currentInstalledData) && info.Mode() == managedHookMode {
-			t.Skip("[F029-bugs-2] hook install follows a dangling managed-hook path and creates/chmods its external target")
-		}
-		t.Fatalf("unexpected dangling hook symlink result: exit=%d output=%q data=%q mode=%v", exitCode, output, data, info.Mode())
 	})
 }
 
