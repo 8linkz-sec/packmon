@@ -1844,6 +1844,7 @@ func TestOpenAPIPublishedExamplesValidateAgainstSchemas(t *testing.T) {
 	checkRequestExample := requireMap(t, requireMap(t, checkRequestExamples, "npmVulnerabilityCheck"), "value")
 	checkResponseMedia := requireMap(t, requireMap(t, requireMap(t, requireMap(t, requireMap(t, checkPost, "responses"), "200"), "content"), "application/json"), "examples")
 	checkResponseExample := requireMap(t, requireMap(t, checkResponseMedia, "blockingFinding"), "value")
+	checkHistoryResponseExample := requireMap(t, requireMap(t, checkResponseMedia, "malwareHistoryInformational"), "value")
 
 	packagePath := requireMap(t, paths, "/api/v1/packages/{ecosystem}/{rest}")
 	packageGetRest := requireOperationParameter(t, requireMap(t, packagePath, "get"), "rest", "path")
@@ -1865,6 +1866,11 @@ func TestOpenAPIPublishedExamplesValidateAgainstSchemas(t *testing.T) {
 			location: "paths//api/v1/check/post/responses/200/content/application/json/examples/blockingFinding/value",
 			fragment: "#/paths/~1api~1v1~1check/post/responses/200/content/application~1json/schema",
 			value:    checkResponseExample,
+		},
+		{
+			location: "paths//api/v1/check/post/responses/200/content/application/json/examples/malwareHistoryInformational/value",
+			fragment: "#/paths/~1api~1v1~1check/post/responses/200/content/application~1json/schema",
+			value:    checkHistoryResponseExample,
 		},
 		{
 			location: "paths//api/v1/packages/{ecosystem}/{rest}/get/parameters/2/example",
@@ -1900,7 +1906,7 @@ func TestOpenAPIPublishedExamplesValidateAgainstSchemas(t *testing.T) {
 		}
 	}
 	if !reflect.DeepEqual(discovered, wantLocations) {
-		t.Fatalf("published semantic example locations = %v, want exact six locations %v", enumKeys(discovered), enumKeys(wantLocations))
+		t.Fatalf("published semantic example locations = %v, want exact seven locations %v", enumKeys(discovered), enumKeys(wantLocations))
 	}
 }
 
@@ -2064,55 +2070,67 @@ func TestOpenAPIMalwareHistoryExampleIsNonBlocking(t *testing.T) {
 	finding := requireMap(t, schemas, "Finding")
 	riskType := requireMap(t, requireMap(t, finding, "properties"), "risk_type")
 	riskDescription, _ := riskType["description"].(string)
-	descriptionDocumentsSemantics := strings.Contains(riskDescription, domain.RiskTypeMalwareHistory) &&
-		strings.Contains(riskDescription, "informational") && strings.Contains(riskDescription, "LOW") &&
-		(strings.Contains(riskDescription, "never blocks") || strings.Contains(riskDescription, "non-blocking"))
+	for _, want := range []string{domain.RiskTypeMalwareHistory, "informational", string(domain.SeverityLow), "never blocks"} {
+		if !strings.Contains(riskDescription, want) {
+			t.Fatalf("Finding.risk_type description missing %q malware-history semantics: %q", want, riskDescription)
+		}
+	}
 
 	checkPost := requireMap(t, requireMap(t, requireMap(t, spec, "paths"), "/api/v1/check"), "post")
 	examples := requireMap(t, requireMap(t, requireMap(t, requireMap(t, requireMap(t, checkPost, "responses"), "200"), "content"), "application/json"), "examples")
-	hasHistoryOnlyNonBlockingExample := false
-	for _, raw := range examples {
-		example, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		value, ok := example["value"].(map[string]any)
-		if !ok || value["findings_blocking"] != false {
-			continue
-		}
-		findings, ok := value["findings"].([]any)
-		if !ok || len(findings) == 0 {
-			continue
-		}
-		historyOnly := true
-		for _, rawFinding := range findings {
-			finding, ok := rawFinding.(map[string]any)
-			if !ok || finding["type"] != string(domain.FindingTypeSupplyChainRisk) || finding["risk_type"] != domain.RiskTypeMalwareHistory || finding["severity"] != string(domain.SeverityLow) {
-				historyOnly = false
-				break
-			}
-		}
-		if historyOnly {
-			hasHistoryOnlyNonBlockingExample = true
-			break
-		}
+	example := requireMap(t, requireMap(t, examples, "malwareHistoryInformational"), "value")
+	if got := requireInt(t, example, "packages_scanned"); got != 1 {
+		t.Fatalf("malware-history example packages_scanned = %d, want 1", got)
+	}
+	if got := requireInt(t, example, "findings_count"); got != 1 {
+		t.Fatalf("malware-history example findings_count = %d, want 1", got)
+	}
+	if got := requireInt(t, example, "manual_advisories_count"); got != 0 {
+		t.Fatalf("malware-history example manual_advisories_count = %d, want 0", got)
+	}
+	if got, exists := example["db_age_days"]; !exists || got != nil {
+		t.Fatalf("malware-history remote example db_age_days = %#v (exists %t), want explicit null", got, exists)
+	}
+	if got, ok := example["findings_blocking"].(bool); !ok || got {
+		t.Fatalf("malware-history example findings_blocking = %#v, want false", example["findings_blocking"])
+	}
+	if got := example["block_threshold"]; got != string(domain.SeverityHigh) {
+		t.Fatalf("malware-history example block_threshold = %#v, want non-NONE %q", got, domain.SeverityHigh)
 	}
 
-	violations := make([]string, 0, 2)
-	if !descriptionDocumentsSemantics {
-		violations = append(violations, "Finding.risk_type malware_history semantics missing")
+	findings, ok := example["findings"].([]any)
+	if !ok || len(findings) != 1 {
+		t.Fatalf("malware-history example findings = %#v, want exactly one finding", example["findings"])
 	}
-	if !hasHistoryOnlyNonBlockingExample {
-		violations = append(violations, "history-only non-blocking scan example missing")
+	wantFinding := map[string]any{
+		"ecosystem": "npm",
+		"name":      "historical-example",
+		"version":   "1.2.3",
+		"type":      string(domain.FindingTypeSupplyChainRisk),
+		"severity":  string(domain.SeverityLow),
+		"title":     "Historical malware reputation",
+		"risk_type": domain.RiskTypeMalwareHistory,
+		"source":    "reversinglabs",
 	}
-	wantViolations := []string{
-		"Finding.risk_type malware_history semantics missing",
-		"history-only non-blocking scan example missing",
+	if !reflect.DeepEqual(findings[0], wantFinding) {
+		t.Fatalf("malware-history example finding = %#v, want %#v", findings[0], wantFinding)
 	}
-	if !reflect.DeepEqual(violations, wantViolations) {
-		t.Fatalf("OPEN F010-bugs-5 current violations = %v, want exactly %v; update the bug guard only when the contract changes intentionally", violations, wantViolations)
+
+	summary := requireMap(t, example, "summary")
+	wantSummary := map[string]any{
+		"by_severity": map[string]any{string(domain.SeverityLow): 1},
+		"by_type":     map[string]any{string(domain.FindingTypeSupplyChainRisk): 1},
+		"by_source":   map[string]any{"reversinglabs": 1},
 	}
-	t.Skip("OPEN F010-bugs-5: Finding.risk_type omits malware_history informational/LOW/non-blocking semantics and the published scan examples omit a history-only non-blocking result")
+	if !reflect.DeepEqual(summary, wantSummary) {
+		t.Fatalf("malware-history example summary = %#v, want %#v", summary, wantSummary)
+	}
+
+	compiler := newOpenAPIInstanceCompiler(t)
+	schema := compileOpenAPIFragment(t, compiler, "#/paths/~1api~1v1~1check/post/responses/200/content/application~1json/schema")
+	if err := schema.Validate(example); err != nil {
+		t.Fatalf("malware-history example does not validate against ScanResult: %v", err)
+	}
 }
 
 func TestOpenAPISyncPaginationContract(t *testing.T) {
