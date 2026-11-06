@@ -85,11 +85,11 @@ func TestDockerRuntimeArtifacts(t *testing.T) {
 	assertDockerAPKPackages(t, serverImage, []string{
 		"ca-certificates=20261020-r0",
 		"git=2.54.0-r0",
-		"tzdata=2026e-r0",
+		"tzdata=2026f-r0",
 	})
 	assertDockerAPKPackages(t, cliImage, []string{
 		"ca-certificates=20261020-r0",
-		"tzdata=2026e-r0",
+		"tzdata=2026f-r0",
 	})
 	assertDockerAPKPackageAbsent(t, cliImage, "git")
 
@@ -144,6 +144,7 @@ func buildPackmonRuntimeImage(t *testing.T, dockerfilePath, contextPath, target,
 	}
 	args := []string{
 		"build",
+		"--no-cache-filter", target,
 		"--file", dockerfilePath,
 		"--target", target,
 		"--tag", image,

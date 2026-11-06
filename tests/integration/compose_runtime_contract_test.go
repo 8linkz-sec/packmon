@@ -196,7 +196,7 @@ func (h *composeRuntimeHarness) buildServerImage() {
 		h.t.Fatal("Compose runtime budget exhausted before the exact-SHA server image build")
 	}
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "docker", "build", "--pull=false", "--target", "server", "--build-arg", "COMMIT="+h.sha, "--tag", h.image, h.buildContext) // #nosec G204 -- exact reviewed archive and test-owned tag
+	cmd := exec.CommandContext(ctx, "docker", "build", "--pull=false", "--no-cache-filter", "server", "--target", "server", "--build-arg", "COMMIT="+h.sha, "--tag", h.image, h.buildContext) // #nosec G204 -- exact reviewed archive and test-owned tag
 	cmd.Env = runtimeDockerEnvironment(nil)
 	output, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {

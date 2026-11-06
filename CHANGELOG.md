@@ -16,6 +16,10 @@
 
 ### Fixed
 
+- Clean server and CLI container builds work again with Alpine 3.24 after
+  updating their exact `tzdata` package pin from `2026e-r0`, which the current
+  repository no longer provides, to `2026f-r0`. The digest-pinned Alpine base
+  image and the other runtime package pins are unchanged.
 - Incremental `/api/v1/sync` deltas no longer miss rows once the server's
   PostgreSQL database has run through its first transaction ID epoch (about
   4 billion transactions). The delta and snapshot filters compared each row's
