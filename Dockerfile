@@ -34,7 +34,7 @@ FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS server
 RUN apk add --no-cache \
       ca-certificates=20261020-r0 \
       git=2.54.0-r0 \
-      tzdata=2026e-r0 && \
+      tzdata=2026f-r0 && \
     addgroup -S packmon && adduser -S packmon -G packmon && \
     mkdir -p /data/feeds /usr/share/doc/packmon && chown packmon:packmon /data/feeds
 COPY --from=build /packmon-server /usr/local/bin/packmon-server
@@ -62,7 +62,7 @@ FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS cli
 
 RUN apk add --no-cache \
       ca-certificates=20261020-r0 \
-      tzdata=2026e-r0 && \
+      tzdata=2026f-r0 && \
     addgroup -S packmon && adduser -S packmon -G packmon && \
     mkdir -p /usr/share/doc/packmon
 COPY --from=build /packmon /usr/local/bin/packmon

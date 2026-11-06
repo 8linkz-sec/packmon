@@ -1175,6 +1175,11 @@ environment) are replaced by the local verification gate in `CONTRIBUTING.md`;
 there is no hosted release pipeline or release environment approval left to
 protect. Run Trivy image and filesystem scans locally before shipping images
 (see `docs/runbook.md` -> "Container image vulnerability scans").
+The maintained Dockerfile pins every Alpine runtime package to an exact
+version. Runtime-package pin changes must be verified by rebuilding the affected
+runtime stages without their cached package-install layers, because a warm
+BuildKit cache can hide a package version that is no longer available from the
+configured Alpine repository.
 
 `ci/gitlab/.packmon-scan.yml` remains in the repository only as an unoperated
 consumer template. No pipeline in this deployment runs it, its CI/CD delivery

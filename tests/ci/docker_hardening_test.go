@@ -107,11 +107,35 @@ func TestDockerfilePinsAlpineRuntimePackageInstalls(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read Dockerfile: %v", err)
 	}
-	assertApkPackagesPinned(t, "Dockerfile", string(dockerData), []string{
-		"ca-certificates",
-		"git",
-		"tzdata",
-	})
+	stages := dockerfileRuntimeStages(t, string(dockerData))
+	for stageName, packagePins := range map[string][]string{
+		"server": {
+			"ca-certificates=20261020-r0",
+			"git=2.54.0-r0",
+			"tzdata=2026f-r0",
+		},
+		"cli": {
+			"ca-certificates=20261020-r0",
+			"tzdata=2026f-r0",
+		},
+	} {
+		stage := stages[stageName]
+		packageNames := make([]string, 0, len(packagePins))
+		for _, packagePin := range packagePins {
+			packageName, _, ok := strings.Cut(packagePin, "=")
+			if !ok {
+				t.Fatalf("invalid test package pin %q", packagePin)
+			}
+			packageNames = append(packageNames, packageName)
+			if count := strings.Count(stage, packageName+"="); count != 1 {
+				t.Errorf("Dockerfile %s runtime stage package %q pin count = %d, want exactly 1", stageName, packageName, count)
+			}
+			if !strings.Contains(stage, packagePin) {
+				t.Errorf("Dockerfile %s runtime stage missing exact package pin %q", stageName, packagePin)
+			}
+		}
+		assertApkPackagesPinned(t, "Dockerfile "+stageName+" runtime stage", stage, packageNames)
+	}
 }
 
 func TestDockerfileRuntimeTargetsKeepLeastPrivilegeEntrypointsAndServerFeedAccess(t *testing.T) {
