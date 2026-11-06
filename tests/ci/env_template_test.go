@@ -43,7 +43,8 @@ func TestReadmeDockerQuickStartUsesInitSecretsFlow(t *testing.T) {
 	}
 	text := string(data)
 
-	startIndex := strings.Index(text, "docker compose run --rm init-secrets")
+	const bootstrapCommand = "docker compose --profile bootstrap run --rm --no-deps init-secrets"
+	startIndex := strings.Index(text, bootstrapCommand)
 	if startIndex < 0 {
 		t.Fatal("README Docker quick start must show the init-secrets flow")
 	}
@@ -73,7 +74,7 @@ func TestReadmeDockerQuickStartUsesInitSecretsFlow(t *testing.T) {
 		"## What Packmon Does",
 		"## Contents",
 		"## Quick Start",
-		"docker compose run --rm init-secrets",
+		bootstrapCommand,
 	}
 	for i := 0; i < len(orderedReadmeMarkers)-1; i++ {
 		assertSubstringOrder(t, text, orderedReadmeMarkers[i], orderedReadmeMarkers[i+1])
@@ -93,6 +94,8 @@ func TestReadmeDockerQuickStartUsesInitSecretsFlow(t *testing.T) {
 		"generated local-only secrets",
 		"Admins can later adjust `.env`",
 		"do not print generated secret values",
+		"separate Compose invocations",
+		"keeps `init-secrets` out of plain `docker compose up`",
 	} {
 		if !strings.Contains(collapsedReadme, want) {
 			t.Fatalf("README Docker quick start must document init-secrets flow behavior with %q", want)
@@ -104,7 +107,7 @@ func TestDockerComposeFailsFastOnEmptyRequiredSecrets(t *testing.T) {
 	t.Parallel()
 
 	// The base docker-compose.yml stays permissive (${VAR:-}) so
-	// `docker compose run --rm init-secrets` can run on a fresh clone; the hard
+	// The explicit bootstrap-profile command can run on a fresh clone; the hard
 	// :? guards live in the self-contained docker-compose.server.yml instead.
 	data, err := os.ReadFile(filepath.Join("..", "..", "docker-compose.server.yml"))
 	if err != nil {

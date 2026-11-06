@@ -30,4 +30,4 @@ PACKMON_UID="${PACKMON_UID:-$default_uid}"
 PACKMON_GID="${PACKMON_GID:-$default_gid}"
 export PACKMON_UID PACKMON_GID
 
-docker compose run --rm init-secrets
+docker compose --profile bootstrap run --rm --no-deps init-secrets

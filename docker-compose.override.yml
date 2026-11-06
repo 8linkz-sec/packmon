@@ -2,11 +2,16 @@
 # is the friendly local path. The hardened server deployment is a separate,
 # self-contained file: `docker compose -f docker-compose.server.yml up -d`.
 services:
-  # One-shot: generate/complete .env with local secrets. Run via
-  # `bash scripts/init-secrets.sh` (native Linux) or
-  # `docker compose run --rm init-secrets`. Bind-mounts the project dir to write
-  # the host .env; runs in Linux so encoding/line-endings are correct on any OS.
+  # One-shot: generate/complete .env with local secrets. Run as a separate
+  # bootstrap phase via `bash scripts/init-secrets.sh` (native Linux) or
+  # `docker compose --profile bootstrap run --rm --no-deps init-secrets`, then
+  # start the application with a new `docker compose up` invocation so Compose
+  # reloads the generated .env. The dedicated profile keeps this writer out of
+  # plain application startup; `--profile bootstrap up` is not a supported
+  # combined bootstrap/start path. Bind-mounts the project dir to write the
+  # host .env; runs in Linux so encoding/line-endings are correct on any OS.
   init-secrets:
+    profiles: ["bootstrap"]
     build:
       context: .
       dockerfile: Dockerfile

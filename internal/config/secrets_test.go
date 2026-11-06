@@ -246,7 +246,7 @@ func TestValidateProductionSecretsAggregates(t *testing.T) {
 	for _, want := range []string{
 		"PACKMON_ENCRYPTION_KEY",
 		"PACKMON_ADMIN_AUDIT_HMAC_KEY",
-		"init-secrets",
+		"docker compose --profile bootstrap run --rm --no-deps init-secrets",
 		"Troubleshooting",
 	} {
 		if !strings.Contains(msg, want) {
