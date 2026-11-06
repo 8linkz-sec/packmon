@@ -2547,8 +2547,8 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal check request: %v", err)
 	}
-	if int64(len(baseBody)) >= maxRequestBody {
-		t.Fatalf("base request size = %d, want less than body limit %d", len(baseBody), maxRequestBody)
+	if int64(len(baseBody)) >= maxCheckRequestBody {
+		t.Fatalf("base request size = %d, want less than body limit %d", len(baseBody), maxCheckRequestBody)
 	}
 
 	tests := []struct {
@@ -2573,9 +2573,9 @@ func TestHandleCheckRequestBodyLimitBoundary(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := &stubStore{}
 			h := newTestHandler(store)
-			paddingLength := maxRequestBody - int64(len(baseBody)) + tt.extraWhitespace
+			paddingLength := maxCheckRequestBody - int64(len(baseBody)) + tt.extraWhitespace
 			body := append(append([]byte(nil), baseBody...), bytes.Repeat([]byte{' '}, int(paddingLength))...)
-			if got, want := int64(len(body)), maxRequestBody+tt.extraWhitespace; got != want {
+			if got, want := int64(len(body)), maxCheckRequestBody+tt.extraWhitespace; got != want {
 				t.Fatalf("request body size = %d, want %d", got, want)
 			}
 
@@ -2805,12 +2805,12 @@ func TestHandleCheck_RequestTooLarge(t *testing.T) {
 
 	h := newTestHandler(&stubStore{})
 
-	// Create a body larger than maxRequestBody (1 MB).
+	// Create a body larger than the /check-specific request limit.
 	// We build a valid-ish JSON prefix but padded to exceed the limit.
 	bigPayload := `{"packages":[` + strings.Repeat(`{"name":"x","version":"1.0.0","ecosystem":"npm"},`, 30000) + `{"name":"x","version":"1.0.0","ecosystem":"npm"}]}`
-	if len(bigPayload) < int(maxRequestBody) {
+	if len(bigPayload) < int(maxCheckRequestBody) {
 		// Pad further if needed.
-		padding := strings.Repeat(" ", int(maxRequestBody)-len(bigPayload)+100)
+		padding := strings.Repeat(" ", int(maxCheckRequestBody)-len(bigPayload)+100)
 		bigPayload = bigPayload + padding
 	}
 

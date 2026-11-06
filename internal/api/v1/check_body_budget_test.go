@@ -42,10 +42,19 @@ func TestHandleCheckMaxPackageCountWithEscapedCoordinates(t *testing.T) {
 
 func TestHandleCheckContractMaximumEscapingFitsRawBodyBudget(t *testing.T) {
 	packages := repeatedCheckPackages(
-		strings.Repeat(`\`, checkcontract.MaxPackageNameLength),
-		strings.Repeat("1", checkcontract.MaxPackageVersionLength),
+		strings.Repeat("<", checkcontract.MaxPackageNameLength),
+		strings.Repeat("<", checkcontract.MaxPackageVersionLength),
 	)
 	body := marshalCheckPackages(t, packages)
+	if !bytes.Contains(body, []byte(`\u003c`)) {
+		t.Fatal("contract-maximum request does not exercise six-byte JSON escaping")
+	}
+	if int64(len(body)) <= maxRequestBody {
+		t.Fatalf("escaped request body size = %d, want above generic limit %d", len(body), maxRequestBody)
+	}
+	if int64(len(body)) > maxCheckRequestBody {
+		t.Fatalf("escaped request body size = %d, want within check limit %d", len(body), maxCheckRequestBody)
+	}
 
 	store := &stubStore{}
 	h := newTestHandler(store)
@@ -54,17 +63,14 @@ func TestHandleCheckContractMaximumEscapingFitsRawBodyBudget(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	h.HandleCheck(rr, req)
 
-	if rr.Code == http.StatusBadRequest && strings.Contains(rr.Body.String(), "request body exceeds") {
-		if int64(len(body)) <= maxRequestBody {
-			t.Fatalf("body-limit rejection for request size %d within current limit %d", len(body), maxRequestBody)
-		}
-		if len(store.vulnerabilityQueriesSnapshot()) != 0 || len(store.maliciousQueriesSnapshot()) != 0 {
-			t.Fatal("body-limit rejection reached package lookups")
-		}
-		t.Skip("F083-bugs-1: the raw body cap rejects a contract-valid maximum-count request after JSON escaping")
-	}
 	if rr.Code != http.StatusOK {
-		t.Fatalf("contract-maximum escaped request status = %d, want 200 after F083-bugs-1 is fixed: %s", rr.Code, rr.Body.String())
+		t.Fatalf("contract-maximum escaped request status = %d, want 200: %s", rr.Code, rr.Body.String())
+	}
+	if got := len(store.vulnerabilityQueriesSnapshot()); got != 1 {
+		t.Fatalf("deduplicated vulnerability lookups = %d, want 1", got)
+	}
+	if got := len(store.maliciousQueriesSnapshot()); got != 1 {
+		t.Fatalf("deduplicated malicious lookups = %d, want 1", got)
 	}
 }
 
