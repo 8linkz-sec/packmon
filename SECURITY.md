@@ -273,6 +273,13 @@ inputs are read-only, writable state is dedicated, and egress is restricted to
 the required internal destinations. `NODES_EXCLUDE=[]` and n8n Cloud are not
 supported for these templates.
 
+The weekly maintenance template does not require an exception to the blocked
+environment-access policy. Its `Configure Metrics URL` Edit Fields node holds
+one workflow-local `metricsUrl` string, empty by default, and the HTTP Request
+node reads that field. Treat the configured URL as trusted workflow
+configuration, keep it on the internal metrics network, and do not expose the
+Packmon metrics listener to untrusted networks to make the request reachable.
+
 User-Agent validation is a hygiene control, not a primary auth control. It
 helps reject accidental or malformed traffic but must not replace API keys.
 

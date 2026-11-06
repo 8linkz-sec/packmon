@@ -227,7 +227,11 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   environment access from expressions and Code nodes remains blocked. The same
   policy applies to every main, worker, and webhook process that loads or
   executes the workflows. The templates remain disabled until the operator has
-  reviewed that runtime and its mounts, credentials, and network policy.
+  reviewed that runtime and its mounts, credentials, and network policy. The
+  weekly maintenance template keeps environment access blocked: its
+  edition-independent Edit Fields node supplies one workflow-local
+  `metricsUrl` string, empty by default, and the HTTP Request node reads that
+  field rather than process environment.
 - The first-party GitHub Actions workflows and the hosted release pipeline
   were removed in August 2026 (internal deployment, no hosted CI);
   `ci/gitlab/.packmon-scan.yml` remains only as an unoperated consumer
