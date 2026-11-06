@@ -16,6 +16,11 @@
 
 ### Fixed
 
+- Chocolatey inventory discovery warnings no longer expose the absolute scan
+  root and candidate path if an injected or future Windows walker callback
+  supplies a file on another volume. The candidate is still rejected, later
+  valid candidates are retained, and the warning now uses only its base name
+  with a fixed reason.
 - Clean server and CLI container builds work again with Alpine 3.24 after
   updating their exact `tzdata` package pin from `2026e-r0`, which the current
   repository no longer provides, to `2026f-r0`. The digest-pinned Alpine base

@@ -80,7 +80,7 @@ func DiscoverFilesWithWarnings(root string, maxDepth int) ([]File, []string, err
 		}
 		rel, relErr := filepath.Rel(absRoot, path)
 		if relErr != nil {
-			warnings = append(warnings, walkWarning(absRoot, path, relErr))
+			warnings = append(warnings, walkWarning(absRoot, path, errors.New("cannot make path relative to scan root")))
 			return nil
 		}
 		relPath, relErr := cleanRelPath(rel)
