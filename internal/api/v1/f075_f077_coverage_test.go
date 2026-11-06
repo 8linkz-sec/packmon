@@ -702,6 +702,7 @@ func TestF075DTOConversionsOwnJSONAndValidRanges(t *testing.T) {
 type f077AuditStore struct {
 	stubStore
 	auditErr        error
+	exportErr       error
 	auditCalls      int
 	exportCalls     int
 	auditContextErr error
@@ -726,7 +727,7 @@ func (s *f077AuditStore) InsertAdminAuditLog(ctx context.Context, entry *db.Admi
 
 func (s *f077AuditStore) ExportSync(context.Context, db.SyncExportOptions) (*db.SyncExport, error) {
 	s.exportCalls++
-	return s.export, nil
+	return s.export, s.exportErr
 }
 
 func TestF077AuditFailureDetachesContextAndSkipsExport(t *testing.T) {
@@ -762,6 +763,72 @@ func TestF077AuditFailureDetachesContextAndSkipsExport(t *testing.T) {
 		if !strings.Contains(logText, want) {
 			t.Fatalf("log missing %q: %s", want, logText)
 		}
+	}
+}
+
+func TestF077SyncStoreFailuresRedactAndBoundDiagnostics(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name            string
+		auditErr        error
+		exportErr       error
+		wantMessage     string
+		wantExportCalls int
+	}{
+		{
+			name:            "audit failure",
+			auditErr:        f077HostileStoreError(),
+			wantMessage:     "sync export audit failed",
+			wantExportCalls: 0,
+		},
+		{
+			name:            "export failure",
+			exportErr:       f077HostileStoreError(),
+			wantMessage:     "sync export failed",
+			wantExportCalls: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := &f077AuditStore{auditErr: tc.auditErr, exportErr: tc.exportErr}
+			var logs bytes.Buffer
+			h := newLogCaptureHandler(store, &logs)
+			req := withCorrelationID(httptest.NewRequest(http.MethodGet, "/api/v1/sync", nil), "corr-f077-log-safe")
+			req.RemoteAddr = "203.0.113.77:4567"
+			recorder := httptest.NewRecorder()
+
+			h.HandleSync(recorder, req)
+
+			if recorder.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500: %s", recorder.Code, recorder.Body.String())
+			}
+			if store.auditCalls != 1 || store.exportCalls != tc.wantExportCalls {
+				t.Fatalf("audit/export calls = %d/%d, want 1/%d", store.auditCalls, store.exportCalls, tc.wantExportCalls)
+			}
+			for _, leaked := range []string{"db-password", "bearer-secret-token-123456", "assignment-secret", `C:\private\workspace\packmon\sync.go`, "private-tail-marker"} {
+				if strings.Contains(recorder.Body.String(), leaked) {
+					t.Fatalf("response leaked %q: %s", leaked, recorder.Body.String())
+				}
+			}
+
+			var logEntry map[string]any
+			if err := json.Unmarshal(bytes.TrimSpace(logs.Bytes()), &logEntry); err != nil {
+				t.Fatalf("decode JSON log: %v; log=%s", err, logs.String())
+			}
+			if logEntry["msg"] != tc.wantMessage {
+				t.Fatalf("log message = %v, want %q", logEntry["msg"], tc.wantMessage)
+			}
+			if logEntry["correlation_id"] != "corr-f077-log-safe" {
+				t.Fatalf("correlation_id = %v, want corr-f077-log-safe", logEntry["correlation_id"])
+			}
+			loggedError, ok := logEntry["error"].(string)
+			if !ok {
+				t.Fatalf("error log field = %T, want string", logEntry["error"])
+			}
+			assertF077SafeDiagnostic(t, loggedError)
+		})
 	}
 }
 

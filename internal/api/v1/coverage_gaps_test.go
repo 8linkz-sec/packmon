@@ -2,9 +2,12 @@ package v1
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/8linkz-sec/packmon/internal/requestctx"
 )
@@ -19,7 +22,7 @@ func TestSyncExportLogAttrsRedactsAndBoundsDiagnostics(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/sync/export", nil)
 	req.RemoteAddr = "203.0.113.7:44321"
 
-	attrs := syncExportLogAttrs(req, "correlation-123", http.ErrBodyNotAllowed)
+	attrs := syncExportLogAttrs(req, "correlation-123", f077HostileStoreError())
 	if len(attrs)%2 != 0 {
 		t.Fatalf("syncExportLogAttrs returned %d values, want key/value pairs", len(attrs))
 	}
@@ -27,11 +30,45 @@ func TestSyncExportLogAttrsRedactsAndBoundsDiagnostics(t *testing.T) {
 	if pairs["correlation_id"] != "correlation-123" {
 		t.Fatalf("correlation_id = %v, want the supplied ID", pairs["correlation_id"])
 	}
-	if _, ok := pairs["error"]; !ok {
-		t.Fatal("attributes carry no error value")
+	loggedError, ok := pairs["error"].(string)
+	if !ok {
+		t.Fatalf("error attribute = %T, want bounded string", pairs["error"])
 	}
+	assertF077SafeDiagnostic(t, loggedError)
 	if _, ok := pairs["api_key_id"]; ok {
 		t.Fatal("attributes carry an API key identity for an unauthenticated request")
+	}
+}
+
+func f077HostileStoreError() error {
+	return errors.New("sync store failure: postgresql://sync-user:db-password@db.internal:5432/packmon?sslmode=disable " +
+		"Bearer bearer-secret-token-123456 password='assignment-secret' " +
+		`C:\private\workspace\packmon\sync.go` + " line\nbreak " +
+		strings.Repeat("diagnostic-界", maxSyncLogErrorValueLength) + " private-tail-marker")
+}
+
+func assertF077SafeDiagnostic(t *testing.T, diagnostic string) {
+	t.Helper()
+
+	if len(diagnostic) > maxSyncLogErrorValueLength {
+		t.Fatalf("diagnostic length = %d, want <= %d: %q", len(diagnostic), maxSyncLogErrorValueLength, diagnostic)
+	}
+	if !utf8.ValidString(diagnostic) {
+		t.Fatalf("diagnostic is not valid UTF-8: %q", diagnostic)
+	}
+	for _, want := range []string{"sync store failure", "postgresql://db.internal:5432/...", "Bearer [redacted]", "(redacted-path)", "...[truncated]"} {
+		if !strings.Contains(diagnostic, want) {
+			t.Fatalf("diagnostic missing %q: %q", want, diagnostic)
+		}
+	}
+	for _, forbidden := range []string{
+		"sync-user", "db-password", "sslmode", "bearer-secret-token-123456",
+		"assignment-secret", `C:\private\workspace\packmon\sync.go`, "private-tail-marker",
+		"\n", "\r", "\t",
+	} {
+		if strings.Contains(diagnostic, forbidden) {
+			t.Fatalf("diagnostic leaked %q: %q", forbidden, diagnostic)
+		}
 	}
 }
 
