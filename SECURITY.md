@@ -310,6 +310,12 @@ Admin properties:
 - sessions use cookies scoped to `/admin` with HttpOnly and SameSite behavior,
   `Secure` where required, an absolute lifetime, and a server-side inactivity
   timeout;
+- a successful login creates its authenticated server-side session before
+  writing the required `login_success` audit row. This is a compensated,
+  fail-closed sequence rather than an atomic database transaction: if the
+  audit write fails or panics, the handler revokes that exact new session and
+  clears both current and legacy session cookies before a failure response can
+  be committed;
 - the shared web footer links a privacy notice by default; operators can replace
   it with `PACKMON_WEB_PRIVACY_URL` and can add an Impressum/legal notice with
   `PACKMON_WEB_LEGAL_URL`;
