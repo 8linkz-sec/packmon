@@ -1,0 +1,24 @@
+# GitLab CI -- jobs live in 8linkz-sec/ci-templates.
+# Go module at the root; web assets (Tailwind, htmx copy, ESLint, Stylelint, Redocly) via package.json.
+# Not related to ci/gitlab/.packmon-scan.yml, the unoperated consumer template.
+include:
+  - project: 8linkz-sec/ci-templates
+    ref: main
+    file:
+      - templates/base.yml
+      - templates/go.yml
+      - templates/node.yml
+      - templates/gitleaks.yml
+      - templates/sonarqube.yml
+      - templates/sbom-dtrack.yml
+
+variables:
+  # package.json only has these scripts; build:web regenerates the committed tailwind.css and htmx.min.js.
+  NODE_SCRIPTS: "lint:web lint:openapi build:web"
+  # As in templates/go.yml, plus the generated/vendored web assets.
+  SONAR_EXTRA_ARGS: >-
+    -Dsonar.sources=.
+    -Dsonar.exclusions=**/*_test.go,**/testdata/**,**/vendor/**,**/node_modules/**,.go/**,.cache/**,internal/web/static/htmx.min.js,internal/web/static/tailwind.css
+    -Dsonar.tests=.
+    -Dsonar.test.inclusions=**/*_test.go
+    -Dsonar.go.coverage.reportPaths=coverage.out
