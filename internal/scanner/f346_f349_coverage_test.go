@@ -68,7 +68,7 @@ func TestF347CollectorReachableFailureAndFilterEdges(t *testing.T) {
 	if err := os.WriteFile(closedPath, []byte("{}"), 0o600); err != nil {
 		t.Fatalf("write closed-file fixture: %v", err)
 	}
-	closedFile, err := os.Open(closedPath)
+	closedFile, err := os.Open(closedPath) // #nosec G304 -- closedPath is a t.TempDir fixture.
 	if err != nil {
 		t.Fatalf("open closed-file fixture: %v", err)
 	}

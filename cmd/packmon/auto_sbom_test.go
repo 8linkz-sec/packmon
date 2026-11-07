@@ -420,7 +420,7 @@ func runAutoSBOMProcessExitHelper(sbomPath string) error {
 				return sbomgen.Result{}, err
 			}
 			if runtime.GOOS != "windows" {
-				info, err := os.Stat(sbomPath)
+				info, err := os.Stat(sbomPath) // #nosec G703 -- sbomPath is the test's own t.TempDir output path.
 				if err != nil {
 					return sbomgen.Result{}, err
 				}
@@ -429,14 +429,14 @@ func runAutoSBOMProcessExitHelper(sbomPath string) error {
 				}
 			}
 			return sbomgen.Result{SBOMPaths: []string{sbomPath}, Cleanup: func() error {
-				return os.Remove(sbomPath)
+				return os.Remove(sbomPath) // #nosec G703 -- sbomPath is the test's own t.TempDir output path.
 			}}, nil
 		},
 		scan: func(_ context.Context, settings scanSettings) (int, error) {
 			if len(settings.SBOMFiles) != 1 || settings.SBOMFiles[0] != sbomPath {
 				return ExitInternal, fmt.Errorf("scan SBOM files = %v, want [%s]", settings.SBOMFiles, sbomPath)
 			}
-			if _, err := os.Stat(sbomPath); err != nil {
+			if _, err := os.Stat(sbomPath); err != nil { // #nosec G703 -- sbomPath is the test's own t.TempDir output path.
 				return ExitInternal, fmt.Errorf("generated SBOM unavailable during scan: %w", err)
 			}
 			return ExitUnderThreshold, nil

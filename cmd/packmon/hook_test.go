@@ -80,7 +80,7 @@ func TestWriteManagedHookReportsFilesystemErrors(t *testing.T) {
 	t.Run("parent path is a file", func(t *testing.T) {
 		parentPath := filepath.Join(t.TempDir(), "hooks")
 		wantData := []byte("parent sentinel\n")
-		if err := os.WriteFile(parentPath, wantData, 0o640); err != nil {
+		if err := os.WriteFile(parentPath, wantData, 0o600); err != nil {
 			t.Fatalf("write parent sentinel: %v", err)
 		}
 		before, err := os.Stat(parentPath)
@@ -112,7 +112,7 @@ func TestWriteManagedHookReportsFilesystemErrors(t *testing.T) {
 		}
 		sentinelPath := filepath.Join(targetPath, "sentinel")
 		wantData := []byte("target sentinel\n")
-		if err := os.WriteFile(sentinelPath, wantData, 0o640); err != nil {
+		if err := os.WriteFile(sentinelPath, wantData, 0o600); err != nil {
 			t.Fatalf("write target sentinel: %v", err)
 		}
 		beforeDir, err := os.Stat(targetPath)
@@ -152,12 +152,12 @@ func TestWriteManagedHookReportsFilesystemErrors(t *testing.T) {
 func TestIsHookModePackmonHookRecognizesCurrentInvocation(t *testing.T) {
 	root := t.TempDir()
 	currentPath := filepath.Join(root, "current")
-	if err := os.WriteFile(currentPath, []byte(hookScript("HIGH")), 0o700); err != nil {
+	if err := os.WriteFile(currentPath, []byte(hookScript("HIGH")), 0o700); err != nil { // #nosec G306 -- Git hook fixture must be executable.
 		t.Fatalf("write current managed hook: %v", err)
 	}
 	legacyPath := filepath.Join(root, "legacy")
 	legacy := "#!/bin/sh\n" + hookMarker + "\npackmon scan . --fail-on HIGH --quiet\n"
-	if err := os.WriteFile(legacyPath, []byte(legacy), 0o700); err != nil {
+	if err := os.WriteFile(legacyPath, []byte(legacy), 0o700); err != nil { // #nosec G306 -- Git hook fixture must be executable.
 		t.Fatalf("write legacy managed hook: %v", err)
 	}
 	unusablePath := filepath.Join(root, "unusable")

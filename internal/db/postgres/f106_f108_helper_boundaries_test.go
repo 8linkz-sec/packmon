@@ -113,7 +113,7 @@ func TestF106LifecycleHelperBoundaries(t *testing.T) {
 			t.Fatalf("lifecycleProductSlugs() = %q, want %q", got, want)
 		}
 
-		ctx := context.WithValue(context.Background(), struct{}{}, "f106")
+		ctx := context.WithValue(context.Background(), f106TestContextKey("f106-marker"), "f106")
 		tx := &f106ScriptedTx{}
 		product := db.LifecycleProduct{ProductSlug: " product ", Releases: []db.LifecycleRelease{
 			{Cycle: "  "},
@@ -179,7 +179,7 @@ func TestF106LifecycleHelperBoundaries(t *testing.T) {
 	})
 
 	t.Run("propagates stale query scan iteration tombstone and delete failures with exact cutoff", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), "f106", "ctx")
+		ctx := context.WithValue(context.Background(), f106TestContextKey("f106"), "ctx")
 		marker := errors.New("stale failure")
 		cases := []struct {
 			name       string
@@ -291,7 +291,7 @@ func TestF107MaliciousHelperBoundaries(t *testing.T) {
 	})
 
 	t.Run("ownership check rejects foreign rows and preserves query and exec causes", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), "f107", "ctx")
+		ctx := context.WithValue(context.Background(), f106TestContextKey("f107"), "ctx")
 		finding := &normalizedMaliciousFinding{ID: "id", Source: "feed", Ecosystem: "npm", Name: "pkg", RiskType: "malware", Severity: "HIGH", ReferenceURLs: []byte("[]")}
 		marker := errors.New("ownership marker")
 		cases := []struct {
@@ -387,7 +387,7 @@ func TestF108ManualAdvisoryHelperBoundaries(t *testing.T) {
 	})
 
 	t.Run("revision accepts zero and match and rejects conflict missing and query error", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), "f108", "ctx")
+		ctx := context.WithValue(context.Background(), f106TestContextKey("f108"), "ctx")
 		stamp := time.Date(2026, 11, 2, 12, 0, 0, 123000, time.UTC)
 		cases := []struct {
 			name     string
@@ -419,7 +419,7 @@ func TestF108ManualAdvisoryHelperBoundaries(t *testing.T) {
 	})
 
 	t.Run("delete stops on malicious and vulnerability errors and reports both missing", func(t *testing.T) {
-		ctx := context.WithValue(context.Background(), "f108-delete", "ctx")
+		ctx := context.WithValue(context.Background(), f106TestContextKey("f108-delete"), "ctx")
 		marker := errors.New("delete marker")
 		cases := []struct {
 			name      string
@@ -451,3 +451,7 @@ func TestF108ManualAdvisoryHelperBoundaries(t *testing.T) {
 		}
 	})
 }
+
+// f106TestContextKey marks the contexts these tests pass through, so a helper that
+// substitutes its own context is detectable.
+type f106TestContextKey string

@@ -72,7 +72,7 @@ func TestWriteListAllHTMLReportsRenderFailureWhenPipeReaderCloses(t *testing.T) 
 			readDone <- readResult{err: fmt.Errorf("open blocking FIFO reader: %w", openErr)}
 			return
 		}
-		defer reader.Close()
+		defer func() { _ = reader.Close() }()
 		one := make([]byte, 1)
 		count, readErr := reader.Read(one)
 		readDone <- readResult{count: count, err: readErr}

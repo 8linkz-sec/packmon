@@ -45,7 +45,7 @@ func TestHTMLReportRelativePathReportsDeletedWorkingDirectoryFailures(t *testing
 		_ = os.RemoveAll(base)
 	}()
 	deleted := filepath.Join(base, "deleted")
-	if err := os.Mkdir(deleted, 0o755); err != nil {
+	if err := os.Mkdir(deleted, 0o750); err != nil {
 		t.Fatalf("create removable working directory: %v", err)
 	}
 	if err := os.Chdir(deleted); err != nil {

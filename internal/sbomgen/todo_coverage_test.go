@@ -353,7 +353,7 @@ func TestScopedReadFailureBoundaries(t *testing.T) {
 		t.Fatal("readFileLimitedScoped(file as root) error = nil")
 	}
 
-	if runtime.GOOS == "windows" && pathWithinRoot(`C:\repo`, `D:\other\file`) {
+	if runtime.GOOS == "windows" && pathWithinRoot(`C:\repo`, `D:\elsewhere\file`) {
 		t.Fatal("pathWithinRoot accepted a path on another Windows volume")
 	}
 

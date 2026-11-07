@@ -107,7 +107,7 @@ func TestGitRepoLockTimeoutAndErrorHelpers(t *testing.T) {
 
 	dir := t.TempDir()
 	repo.Dir = dir
-	release, err := repo.acquireSyncLock(nil)
+	release, err := repo.acquireSyncLock(nil) //nolint:staticcheck // SA1012: the nil-context fallback is under test.
 	if err != nil {
 		t.Fatalf("acquireSyncLock(nil context) error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestGitRepoLockTimeoutAndErrorHelpers(t *testing.T) {
 		t.Fatalf("lock survived release: %v", err)
 	}
 
-	ctx, cancel := withTimeout(nil, time.Second)
+	ctx, cancel := withTimeout(nil, time.Second) //nolint:staticcheck // SA1012: the nil-context fallback is under test.
 	if ctx == nil {
 		t.Fatal("withTimeout(nil) returned nil context")
 	}
@@ -216,7 +216,7 @@ func TestGitRepoFreshCloneHelper(t *testing.T) {
 			os.Exit(1)
 		}
 		target := args[len(args)-1]
-		_ = os.MkdirAll(filepath.Join(target, ".git"), 0o750)
+		_ = os.MkdirAll(filepath.Join(target, ".git"), 0o750) // #nosec G703 -- fake git helper writes below the test's clone target.
 		os.Exit(0)
 	case "rev-parse":
 		if mode == "fail-head" {

@@ -248,14 +248,14 @@ func TestTaggedTestPackagesIgnoreUntrackedIgnoredCopies(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(fixturePath), 0o750); err != nil {
 		t.Fatalf("create ignored tagged-test package: %v", err)
 	}
-	if err := os.WriteFile(fixturePath, []byte("//go:build integration\n\npackage integration\n"), 0o600); err != nil { //nolint:gosec // test-owned ignored fixture.
+	if err := os.WriteFile(fixturePath, []byte("//go:build integration\n\npackage integration\n"), 0o600); err != nil {
 		t.Fatalf("write ignored tagged-test copy: %v", err)
 	}
 	rel, err := filepath.Rel(root, fixturePath)
 	if err != nil {
 		t.Fatalf("resolve ignored tagged-test path: %v", err)
 	}
-	ignoreCmd := exec.Command("git", "check-ignore", "--quiet", "--", filepath.ToSlash(rel))
+	ignoreCmd := exec.Command("git", "check-ignore", "--quiet", "--", filepath.ToSlash(rel)) // #nosec G204 -- fixed git subcommand on a test-owned path.
 	ignoreCmd.Dir = root
 	if err := ignoreCmd.Run(); err != nil {
 		t.Fatalf("fixture %s is not ignored by Git: %v", filepath.ToSlash(rel), err)

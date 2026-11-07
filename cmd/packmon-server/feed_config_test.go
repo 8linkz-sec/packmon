@@ -132,8 +132,8 @@ func TestApplyStoredFeedConfigOverridesErrorAndIgnoredBranches(t *testing.T) {
 	invalidMode := strings.Repeat("x", 600)
 	for _, override := range []*db.FeedConfig{
 		{FeedName: "unknown", Enabled: true, Mode: "self"},
-		{FeedName: "osv", Enabled: true, Mode: invalidMode, SyncInterval: &ignoredInterval, APIKey: "ignored-key"}, //nolint:gosec // fake ignored test credential.
-		{FeedName: "vulncheck", Enabled: true, Mode: "external", APIKey: "  persisted-key  "},                      //nolint:gosec // fake persisted test credential.
+		{FeedName: "osv", Enabled: true, Mode: invalidMode, SyncInterval: &ignoredInterval, APIKey: "ignored-key"},
+		{FeedName: "vulncheck", Enabled: true, Mode: "external", APIKey: "  persisted-key  "}, //nolint:gosec // fake persisted test credential.
 	} {
 		if err := store.UpsertFeedConfig(context.Background(), override); err != nil {
 			t.Fatalf("UpsertFeedConfig(%s) error = %v", override.FeedName, err)

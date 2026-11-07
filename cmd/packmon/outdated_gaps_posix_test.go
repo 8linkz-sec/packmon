@@ -66,7 +66,7 @@ func TestRunOutdatedReportsAbsolutePathFailure(t *testing.T) {
 			break
 		}
 	}
-	cmd := exec.CommandContext(ctx, os.Args[0], childArgs...)
+	cmd := exec.CommandContext(ctx, os.Args[0], childArgs...) // #nosec G204,G702 -- reexecutes this exact test binary with fixed helper arguments.
 	cmd.Env = append(os.Environ(), outdatedAbsolutePathFailureHelperEnv+"=1")
 	output := &boundedCommandOutput{limit: 32 << 10}
 	cmd.Stdout = output

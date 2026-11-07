@@ -147,7 +147,7 @@ func TestHTMLReportRelativePathRejectsSiblingPrefixContainment(t *testing.T) {
 	root := filepath.Join(parent, "repo")
 	sibling := filepath.Join(parent, "repo-sibling")
 	source := filepath.Join(sibling, "nested", "go.sum")
-	if err := os.MkdirAll(filepath.Dir(source), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(source), 0o750); err != nil {
 		t.Fatalf("create sibling fixture: %v", err)
 	}
 	if err := os.WriteFile(source, []byte("fixture"), 0o600); err != nil {

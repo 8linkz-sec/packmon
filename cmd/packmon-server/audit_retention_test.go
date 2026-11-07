@@ -210,7 +210,7 @@ func TestRunAuditRetentionOnceStopsAfterCancellation(t *testing.T) {
 func TestRunAuditRetentionOnceContinuesAfterPruneErrorAndSuppressesZeroRows(t *testing.T) {
 	t.Parallel()
 
-	const secret = "audit-retention-secret-token"
+	const secret = "audit-retention-secret-token" // #nosec G101 -- fake test token.
 	scanErr := errors.New("scan prune failed with Bearer " + secret + " " + strings.Repeat("x", 600))
 	store := &auditRetentionLifecycleStore{results: map[string]auditRetentionResult{
 		"scan_log":      {err: scanErr},
