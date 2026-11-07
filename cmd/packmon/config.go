@@ -253,7 +253,7 @@ repos:
 }
 
 func writeExclusiveConfigFile(path string, content []byte) (err error) {
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) // #nosec G304 -- path is the operator-selected config file; O_EXCL never opens an existing file.
 	if err != nil {
 		return err
 	}

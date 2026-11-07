@@ -1,0 +1,30 @@
+# gitleaks policy for the self-hosted GitLab pipeline (shared ci-templates job "gitleaks").
+# A repository .gitleaks.toml replaces the shared policy, so its two allowlists are repeated here.
+# Every default detector stays active everywhere else, tests included.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "made-up credentials in test fixtures (generic-api-key only; shared ci-templates policy)"
+targetRules = ["generic-api-key"]
+paths = [
+  '''_test\.go$''',
+  '''\.(test|spec)\.[cm]?[jt]sx?$''',
+  '''(^|/)tests?/''',
+  '''(^|/)test_[^/]*\.py$''',
+]
+
+[[allowlists]]
+description = "documented placeholder values (generic-api-key only; shared ci-templates policy)"
+targetRules = ["generic-api-key"]
+stopwords = ["sentinel"]
+
+[[allowlists]]
+description = "internal/logsafe redaction tests: PEM blocks and tokens are made-up inputs and golden outputs"
+targetRules = ["private-key", "generic-api-key"]
+paths = [
+  '''(^|/)internal/logsafe/testdata/''',
+  '''(^|/)internal/logsafe/secret_forms_test\.go$''',
+  '''(^|/)internal/logsafe/baseline_golden_test\.go$''',
+]

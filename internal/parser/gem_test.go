@@ -202,7 +202,7 @@ func equalStrings(got, want []string) bool {
 		return false
 	}
 	for index := range got {
-		if got[index] != want[index] {
+		if got[index] != want[index] { // #nosec G602 -- len(got) == len(want) is checked above.
 			return false
 		}
 	}

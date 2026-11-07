@@ -141,7 +141,7 @@ function measure(frame,isNarrow){
 });
 </script></body></html>`, reportJSON, longJSON)
 	harnessPath := filepath.Join(t.TempDir(), "responsive-harness.html")
-	if err := os.WriteFile(harnessPath, []byte(harness), 0o600); err != nil {
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o600); err != nil { // #nosec G703 -- harnessPath is a t.TempDir path.
 		t.Fatalf("write responsive harness: %v", err)
 	}
 	dom := f040DumpBrowserDOM(t, browser, cliHTMLReportFileURL(t, harnessPath), "1400,1500", 1200)
@@ -323,7 +323,7 @@ Object.defineProperty(navigator,"language",{value:"en-US",configurable:true});
 				t.Fatal("instrumentation changed or duplicated the production locale script")
 			}
 			instrumentedPath := filepath.Join(t.TempDir(), "locale-instrumented.html")
-			if err := os.WriteFile(instrumentedPath, []byte(instrumented), 0o600); err != nil {
+			if err := os.WriteFile(instrumentedPath, []byte(instrumented), 0o600); err != nil { // #nosec G703 -- instrumentedPath is a t.TempDir path.
 				t.Fatalf("write instrumented locale report: %v", err)
 			}
 			dom := f040DumpBrowserDOM(t, browser, cliHTMLReportFileURL(t, instrumentedPath), "900,700", 700)

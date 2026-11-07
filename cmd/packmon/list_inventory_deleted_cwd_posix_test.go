@@ -34,16 +34,16 @@ func TestCollectListAllInventoryPhaseRetainsValidRowsAcrossNativeDiscoveryWarnin
 		t.Fatalf("create helper fixture root: %v", err)
 	}
 	t.Cleanup(func() {
-		_ = os.Chmod(filepath.Join(root, "blocked"), 0o700)
+		_ = os.Chmod(filepath.Join(root, "blocked"), 0o700) // #nosec G302 -- restores a test directory; directories need the search bit.
 		_ = os.RemoveAll(root)
 	})
-	if err := os.Chmod(root, 0o755); err != nil {
+	if err := os.Chmod(root, 0o755); err != nil { // #nosec G302 -- the unprivileged helper must traverse this test directory.
 		t.Fatalf("make helper fixture root traversable: %v", err)
 	}
 	writeFile(t, filepath.Join(root, "Dockerfile"), "FROM alpine:3.23\n")
 	writeFile(t, filepath.Join(root, "install.ps1"), "choco install git --version 2.47.0 -y\n")
 	for _, path := range []string{filepath.Join(root, "Dockerfile"), filepath.Join(root, "install.ps1")} {
-		if err := os.Chmod(path, 0o644); err != nil {
+		if err := os.Chmod(path, 0o644); err != nil { // #nosec G302 -- the unprivileged helper must read this test fixture.
 			t.Fatalf("make helper fixture readable: %v", err)
 		}
 	}
@@ -54,7 +54,7 @@ func TestCollectListAllInventoryPhaseRetainsValidRowsAcrossNativeDiscoveryWarnin
 	writeFile(t, filepath.Join(blocked, "nested", "Dockerfile"), "FROM busybox:1.36\n")
 	writeFile(t, filepath.Join(blocked, "nested", "config.xml"), `<config><packages><package name="blocked"/></packages></config>`)
 	t.Cleanup(func() {
-		_ = os.Chmod(blocked, 0o700)
+		_ = os.Chmod(blocked, 0o700) // #nosec G302 -- restores a test directory; directories need the search bit.
 	})
 	if err := os.Chmod(blocked, 0); err != nil {
 		t.Fatalf("chmod blocked directory: %v", err)
@@ -158,13 +158,13 @@ func runListInventoryDeletedWorkingDirectoryHelper(t *testing.T, mode string) {
 		}
 	})
 	deleted := filepath.Join(base, "deleted")
-	if err := os.Mkdir(deleted, 0o750); err != nil {
+	if err := os.Mkdir(deleted, 0o750); err != nil { // #nosec G703 -- deleted is below t.TempDir.
 		t.Fatalf("create deleted current directory: %v", err)
 	}
 	if err := os.Chdir(deleted); err != nil {
 		t.Fatalf("enter deleted current directory: %v", err)
 	}
-	if err := os.Remove(deleted); err != nil {
+	if err := os.Remove(deleted); err != nil { // #nosec G703 -- deleted is below t.TempDir.
 		t.Fatalf("remove current directory: %v", err)
 	}
 	if _, err := os.Getwd(); err == nil {
@@ -234,17 +234,17 @@ func copyListInventoryHelperExecutable(t *testing.T) string {
 			t.Errorf("remove unprivileged helper directory: %v", removeErr)
 		}
 	})
-	if err := os.Chmod(dir, 0o755); err != nil {
+	if err := os.Chmod(dir, 0o755); err != nil { // #nosec G302 -- the unprivileged helper must traverse this test directory.
 		t.Fatalf("make unprivileged helper directory traversable: %v", err)
 	}
 
-	source, err := os.Open(os.Args[0]) // #nosec G304 -- the test copies its own executable.
+	source, err := os.Open(os.Args[0]) // #nosec G304,G703 -- the test copies its own executable.
 	if err != nil {
 		t.Fatalf("open test executable: %v", err)
 	}
-	defer source.Close()
+	defer func() { _ = source.Close() }()
 	destinationPath := filepath.Join(dir, "packmon.test")
-	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755) // #nosec G304,G306 -- an executable copy is required for the dropped-privilege helper.
+	destination, err := os.OpenFile(destinationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755) // #nosec G302,G304,G306 -- an executable copy is required for the dropped-privilege helper.
 	if err != nil {
 		t.Fatalf("create helper executable: %v", err)
 	}
@@ -255,7 +255,7 @@ func copyListInventoryHelperExecutable(t *testing.T) string {
 	if err := destination.Close(); err != nil {
 		t.Fatalf("close helper executable: %v", err)
 	}
-	if err := os.Chmod(destinationPath, 0o755); err != nil {
+	if err := os.Chmod(destinationPath, 0o755); err != nil { // #nosec G302 -- the copied test binary must be executable.
 		t.Fatalf("make helper executable runnable: %v", err)
 	}
 	return destinationPath

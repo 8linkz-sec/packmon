@@ -70,7 +70,7 @@ func TestAsyncWorkerDescriptorWiresConfiguredReversingLabsOptions(t *testing.T) 
 	runtime := asyncWorkerRuntime{
 		store:  newNoopStore(),
 		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		feeds: config.FeedsConfig{
+		feeds: config.FeedsConfig{ // #nosec G101 -- fake test feed credentials.
 			ReversingLabsAPIKey:             "rl-fixture-key",
 			ReversingLabsBaseURL:            "https://rl.example.test/community",
 			ReversingLabsLookupTTL:          13 * time.Hour,

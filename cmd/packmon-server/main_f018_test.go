@@ -72,7 +72,7 @@ func TestF018MainDispatchesSuccessfulSubcommands(t *testing.T) {
 		if !strings.Contains(out, "init-secrets:") || !strings.Contains(out, target) {
 			t.Fatalf("init-secrets output = %q, want successful target report", out)
 		}
-		contents, err := os.ReadFile(target)
+		contents, err := os.ReadFile(target) // #nosec G304 -- target is the test's own t.TempDir output path.
 		if err != nil {
 			t.Fatalf("read generated env: %v", err)
 		}
@@ -310,12 +310,12 @@ func TestF018RunPreservesListenerFailureThroughShutdown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reserve main listener: %v", err)
 	}
-	defer mainListener.Close()
+	defer func() { _ = mainListener.Close() }()
 	metricsListener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("reserve metrics listener: %v", err)
 	}
-	defer metricsListener.Close()
+	defer func() { _ = metricsListener.Close() }()
 
 	t.Setenv("PACKMON_SERVER_MODE", "development")
 	t.Setenv("PACKMON_SERVER_PORT", strconv.Itoa(mainListener.Addr().(*net.TCPAddr).Port))
@@ -469,7 +469,7 @@ func TestF018RequiredSecretSpecFallsBackForUnknownKey(t *testing.T) {
 }
 
 func TestF018DatabaseStartupContextNormalizesNilInputs(t *testing.T) {
-	ctx, cancel := databaseStartupContext(nil, nil)
+	ctx, cancel := databaseStartupContext(nil, nil) //nolint:staticcheck // SA1012: the nil-context normalization is under test.
 	defer cancel()
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -482,7 +482,7 @@ func TestF018DatabaseStartupContextNormalizesNilInputs(t *testing.T) {
 }
 
 func TestF018DSNWithConnectTimeoutBranchMatrix(t *testing.T) {
-	base := "postgres://packmon:secret@127.0.0.1:5432/packmon?sslmode=disable"
+	base := "postgres://packmon:secret@127.0.0.1:5432/packmon?sslmode=disable" // #nosec G101 -- fake DSN for the timeout matrix.
 	for _, timeout := range []time.Duration{0, -time.Second} {
 		got, err := dsnWithConnectTimeout(base, timeout)
 		if err != nil || got != base {

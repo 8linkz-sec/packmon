@@ -24,3 +24,56 @@ variables:
     -Dsonar.tests=.
     -Dsonar.test.inclusions=**/*_test.go
     -Dsonar.go.coverage.reportPaths=coverage.out
+
+# The test suites require these tools and fail (by design) when one is missing:
+#   Chromium            HTML report browser tests in cmd/packmon (PACKMON_BROWSER_BIN)
+#   node, npm + npm ci  ESLint/Stylelint/.npmrc contracts in tests/ci (Stylelint runs from node_modules)
+#   docker CLI+compose  `docker compose config` contracts in tests/ci (no daemon is used)
+#   golangci-lint       configuration contract in tests/ci (same version as the Makefile pin)
+# Debian packages are signature-checked by apt; Node is checked against the official SHA-256; golangci-lint
+# is built from its module, checked by the Go checksum database. Downloads are cached in the shared /cache.
+.packmon-test-tools:
+  variables:
+    NODE_VERSION: "26.13.0"
+    NODE_SHA256: 5848553868b402d3fabb5b09270649977780a390f832155721025a08b5104455
+    GOLANGCI_LINT_VERSION: v2.14.0
+    PACKMON_BROWSER_BIN: /usr/bin/chromium
+    DEBIAN_FRONTEND: noninteractive
+  before_script:
+    - mkdir -p /cache/apt/partial /cache/tools
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends -o Dir::Cache::Archives=/cache/apt chromium docker-cli docker-compose >/dev/null
+    - |
+      node_dir="/cache/tools/node-v${NODE_VERSION}"
+      if [ ! -x "$node_dir/bin/node" ]; then
+        tmp="$(mktemp -d)"
+        curl -fsSLo "$tmp/node.tar.gz" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz"
+        echo "${NODE_SHA256}  $tmp/node.tar.gz" | sha256sum -c -
+        mkdir "$tmp/node" && tar -xzf "$tmp/node.tar.gz" -C "$tmp/node" --strip-components=1
+        # Concurrent jobs may race here; whichever rename lands first wins, the other copy is dropped.
+        mv -T "$tmp/node" "$node_dir" 2>/dev/null || rm -rf "$tmp/node"
+        rm -rf "$tmp"
+      fi
+      export PATH="$node_dir/bin:$PATH"
+    - |
+      lint_dir="/cache/tools/golangci-lint-${GOLANGCI_LINT_VERSION}"
+      [ -x "$lint_dir/golangci-lint" ] || GOBIN="$lint_dir" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
+      export PATH="$lint_dir:$PATH"
+    - node --version && npm --version && docker compose version && chromium --version && golangci-lint version
+    - npm ci --no-audit --no-fund
+
+# node_modules now exists in the checkout; like the Makefile's GO_PACKAGES, keep its Go package
+# (node_modules/flatted/golang/pkg/flatted) out of the test run.
+go-test:
+  extends: [.go-base, .packmon-test-tools]
+  script:
+    - go test $(go list ./... | grep -v /node_modules/) -count=1 -timeout=10m -coverprofile=coverage.out
+
+go-test-race:
+  extends: [.go-base, .packmon-test-tools]
+  script:
+    - go test $(go list ./... | grep -v /node_modules/) -race -count=1 -timeout=10m
+
+# Same linter version as the Makefile pin (GOLANGCI_LINT_VERSION), so local and CI runs agree.
+golangci-lint:
+  image: golangci/golangci-lint:v2.14.0@sha256:ad862ba6b3798cbe0fd9fd7408d498fd74fbd2623a92406b2fd3898faf0bf98f

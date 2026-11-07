@@ -107,7 +107,7 @@ func TestF247ParseDockerfileImagesPropagatesReadErrorWithoutLeakingContent(t *te
 	errRead := errors.New("injected read failure")
 	// The parser must report the reader failure, not echo the Dockerfile line
 	// that preceded it. That line can contain registry credentials or paths.
-	const sensitiveLine = "# https://user:token@registry.internal/private/image"
+	const sensitiveLine = "# https://user:token@registry.internal/private/image" // #nosec G101 -- fake credential the test proves is not echoed.
 	reader := io.MultiReader(strings.NewReader(sensitiveLine+"\n"), f247ErrorReader{err: errRead})
 
 	images, err := ParseDockerfileImages(reader, "Dockerfile")

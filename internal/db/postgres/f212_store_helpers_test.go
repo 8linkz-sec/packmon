@@ -18,7 +18,7 @@ func TestF212StoreConfigurationErrorsDoNotExposePasswords(t *testing.T) {
 	t.Run("new pool config URL", func(t *testing.T) {
 		t.Parallel()
 
-		const password = "f212-url-password"
+		const password = "f212-url-password" // #nosec G101 -- fake test password.
 		config, err := newPgxPoolConfig(
 			"postgres://packmon:"+password+"@localhost/packmon?pool_max_conns=not-a-number",
 			nil,
@@ -32,7 +32,7 @@ func TestF212StoreConfigurationErrorsDoNotExposePasswords(t *testing.T) {
 	t.Run("New keyword DSN", func(t *testing.T) {
 		t.Parallel()
 
-		const password = "f212 keyword password"
+		const password = "f212 keyword password" // #nosec G101 -- fake test password.
 		store, err := New(
 			context.Background(),
 			"host=localhost user=packmon password='"+password+"' dbname=packmon pool_max_conns=not-a-number",
@@ -70,7 +70,7 @@ func TestF212NewPingFailureClosesStoreAndDoesNotExposePassword(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = listener.Close() })
 
-	const password = "f212-ping-password"
+	const password = "f212-ping-password" // #nosec G101 -- fake test password.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	store, err := New(ctx, fmt.Sprintf("postgres://packmon:%s@%s/packmon?sslmode=disable", password, listener.Addr()), nil, nil)

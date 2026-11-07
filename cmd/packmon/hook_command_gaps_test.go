@@ -165,7 +165,7 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 		}
 		hooksPath := filepath.Join(gitDir, "hooks")
 		wantData := []byte("hooks path sentinel\n")
-		if err := os.WriteFile(hooksPath, wantData, 0o640); err != nil {
+		if err := os.WriteFile(hooksPath, wantData, 0o600); err != nil {
 			t.Fatalf("write hooks-path sentinel: %v", err)
 		}
 		before, err := os.Stat(hooksPath)
@@ -202,11 +202,11 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 			t.Fatalf("create hooks directory: %v", err)
 		}
 		t.Cleanup(func() {
-			if err := os.Chmod(hooksDir, 0o750); err != nil && !os.IsNotExist(err) {
+			if err := os.Chmod(hooksDir, 0o750); err != nil && !os.IsNotExist(err) { // #nosec G302 -- hooksDir is a directory and needs its search bit.
 				t.Errorf("restore hooks directory mode: %v", err)
 			}
 		})
-		if err := os.Chmod(hooksDir, 0o500); err != nil {
+		if err := os.Chmod(hooksDir, 0o500); err != nil { // #nosec G302 -- read-only directory fixture; a directory needs its search bit.
 			t.Fatalf("make hooks directory read-only: %v", err)
 		}
 		probePath := filepath.Join(hooksDir, "permission-probe")
@@ -237,7 +237,7 @@ func TestHookInstallReportsFilesystemFailures(t *testing.T) {
 		}
 		externalPath := filepath.Join(t.TempDir(), "external-managed-hook")
 		wantData := []byte("#!/bin/sh\n" + hookMarker + "\necho external sentinel\n")
-		if err := os.WriteFile(externalPath, wantData, 0o700); err != nil {
+		if err := os.WriteFile(externalPath, wantData, 0o700); err != nil { // #nosec G306 -- Git hook fixture must be executable.
 			t.Fatalf("write external managed hook: %v", err)
 		}
 		before, err := os.Stat(externalPath)
@@ -337,7 +337,7 @@ func TestHookUninstallReportsRemovalFailure(t *testing.T) {
 	}
 	hookPath := filepath.Join(hooksDir, "pre-push")
 	wantData := []byte(hookScript("HIGH"))
-	if err := os.WriteFile(hookPath, wantData, managedHookMode); err != nil { //nolint:gosec // G306: fixture is an executable Git hook.
+	if err := os.WriteFile(hookPath, wantData, managedHookMode); err != nil {
 		t.Fatalf("write managed hook: %v", err)
 	}
 	probePath := filepath.Join(hooksDir, "permission-probe")
@@ -349,11 +349,11 @@ func TestHookUninstallReportsRemovalFailure(t *testing.T) {
 		t.Fatalf("stat managed hook: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := os.Chmod(hooksDir, 0o750); err != nil && !os.IsNotExist(err) {
+		if err := os.Chmod(hooksDir, 0o750); err != nil && !os.IsNotExist(err) { // #nosec G302 -- hooksDir is a directory and needs its search bit.
 			t.Errorf("restore hooks directory mode: %v", err)
 		}
 	})
-	if err := os.Chmod(hooksDir, 0o500); err != nil {
+	if err := os.Chmod(hooksDir, 0o500); err != nil { // #nosec G302 -- read-only directory fixture; a directory needs its search bit.
 		t.Fatalf("make hooks directory non-writable: %v", err)
 	}
 	if err := os.Remove(probePath); err == nil {
@@ -369,7 +369,7 @@ func TestHookUninstallReportsRemovalFailure(t *testing.T) {
 	if strings.Contains(output, "Removed packmon") {
 		t.Fatalf("hook uninstall reported removal after denied delete: %q", output)
 	}
-	if err := os.Chmod(hooksDir, 0o750); err != nil {
+	if err := os.Chmod(hooksDir, 0o750); err != nil { // #nosec G302 -- hooksDir is a directory and needs its search bit.
 		t.Fatalf("restore hooks directory for verification: %v", err)
 	}
 	assertHookFileState(t, hookPath, wantData, before.Mode())
@@ -386,7 +386,7 @@ func TestHookUninstallReportsStatFailure(t *testing.T) {
 	}
 	hookPath := filepath.Join(hooksDir, "pre-push")
 	wantData := []byte(hookScript("HIGH"))
-	if err := os.WriteFile(hookPath, wantData, managedHookMode); err != nil { //nolint:gosec // G306: fixture is an executable Git hook.
+	if err := os.WriteFile(hookPath, wantData, managedHookMode); err != nil {
 		t.Fatalf("write managed hook: %v", err)
 	}
 	before, err := os.Stat(hookPath)
@@ -394,7 +394,7 @@ func TestHookUninstallReportsStatFailure(t *testing.T) {
 		t.Fatalf("stat managed hook before restriction: %v", err)
 	}
 	t.Cleanup(func() {
-		if err := os.Chmod(gitDir, 0o750); err != nil && !os.IsNotExist(err) {
+		if err := os.Chmod(gitDir, 0o750); err != nil && !os.IsNotExist(err) { // #nosec G302 -- gitDir is a directory and needs its search bit.
 			t.Errorf("restore git directory mode: %v", err)
 		}
 	})
@@ -406,7 +406,7 @@ func TestHookUninstallReportsStatFailure(t *testing.T) {
 	}
 
 	output, exitCode := runHookExitHelper(t, root, "uninstall")
-	if err := os.Chmod(gitDir, 0o750); err != nil {
+	if err := os.Chmod(gitDir, 0o750); err != nil { // #nosec G302 -- gitDir is a directory and needs its search bit.
 		t.Fatalf("restore git directory for verification: %v", err)
 	}
 	assertHookFileState(t, hookPath, wantData, before.Mode())

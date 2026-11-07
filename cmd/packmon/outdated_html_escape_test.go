@@ -19,7 +19,7 @@ func TestOutdatedHTMLEscapesHostilePackageMetadata(t *testing.T) {
 	}
 	lockRelative := filepath.Join("nested", `lock-<img src=javascript:alert(9) onerror=steal()>.json`)
 	lockAbsolute := filepath.Join(target, lockRelative)
-	values := map[string]string{
+	values := map[string]string{ // #nosec G101 -- fake credentials the test proves are escaped.
 		"target":    filepath.Base(target),
 		"name":      `name-</h2><script>alert("name")</script>`,
 		"installed": `installed-<svg onload=alert(2)>`,

@@ -45,13 +45,13 @@ func TestPrometheusStarterRulesWithPromtool(t *testing.T) {
 		t.Fatalf("find promtool: %v", err)
 	}
 
-	check := exec.Command(promtool, "check", "rules", filepath.ToSlash(filepath.Join("docs", "monitoring", "packmon-alerts.yml")))
+	check := exec.Command(promtool, "check", "rules", filepath.ToSlash(filepath.Join("docs", "monitoring", "packmon-alerts.yml"))) // #nosec G204 -- promtool resolved via LookPath; fixed arguments.
 	check.Dir = root
 	if output, err := check.CombinedOutput(); err != nil {
 		t.Fatalf("promtool check rules failed: %v\n%s", err, output)
 	}
 
-	testRules := exec.Command(promtool, "test", "rules", filepath.Base(fixturePath))
+	testRules := exec.Command(promtool, "test", "rules", filepath.Base(fixturePath)) // #nosec G204 -- promtool resolved via LookPath; fixed arguments.
 	testRules.Dir = filepath.Dir(fixturePath)
 	if output, err := testRules.CombinedOutput(); err != nil {
 		t.Fatalf("promtool test rules failed: %v\n%s", err, output)
@@ -60,7 +60,7 @@ func TestPrometheusStarterRulesWithPromtool(t *testing.T) {
 
 func gitTrackedFixture(root, fixtureRel string) ([]byte, error) {
 	args := []string{"ls-files", "--error-unmatch", "--", filepath.ToSlash(fixtureRel)}
-	tracked := exec.Command("git", args...)
+	tracked := exec.Command("git", args...) // #nosec G204 -- fixed git ls-files arguments.
 	tracked.Dir = root
 	output, err := tracked.CombinedOutput()
 	if err == nil || runtime.GOOS != "linux" {
@@ -76,7 +76,7 @@ func gitTrackedFixture(root, fixtureRel string) ([]byte, error) {
 		return output, err
 	}
 	gitDir = filepath.Join("/mnt", strings.ToLower(gitDir[:1]), filepath.FromSlash(gitDir[3:]))
-	tracked = exec.Command("git", append([]string{"--git-dir", gitDir, "--work-tree", root}, args...)...)
+	tracked = exec.Command("git", append([]string{"--git-dir", gitDir, "--work-tree", root}, args...)...) // #nosec G204 -- fixed git ls-files arguments.
 	tracked.Dir = root
 	return tracked.CombinedOutput()
 }

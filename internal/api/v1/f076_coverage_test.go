@@ -562,7 +562,7 @@ func TestHandlerNilReceiversAndConfigurationFallbacks(t *testing.T) {
 	if h.scanLogIdentityMode != config.ScanLogIdentityModeFull {
 		t.Fatalf("invalid identity mode became %q, want full", h.scanLogIdentityMode)
 	}
-	h.ConfigureBackgroundContext(nil)
+	h.ConfigureBackgroundContext(nil) //nolint:staticcheck // SA1012: the nil-context fallback is under test.
 	if h.backgroundCtx == nil || h.backgroundContext() == nil {
 		t.Fatal("nil background configuration did not install context.Background")
 	}

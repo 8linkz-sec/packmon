@@ -1732,12 +1732,24 @@ with the hosted CI setup. The GitLab shared CI template
 any pipeline here.
 
 Since November 2026 the root `.gitlab-ci.yml` runs this repository's own
-checks on the operator's self-hosted GitLab instance. It only includes the
+checks on the operator's self-hosted GitLab instance. It includes the
 operator's shared CI templates: `go vet`, `go test` with and without `-race`,
 `golangci-lint`, `govulncheck`, the web asset lint and build scripts from
-`package.json`, `npm audit`, gitleaks, a SonarQube analysis, and a CycloneDX
-SBOM upload to Dependency-Track. It is a development pipeline for Packmon
+`package.json`, `npm audit`, gitleaks, a SonarQube analysis, a CycloneDX
+SBOM upload to Dependency-Track, and a final job that pushes `main` to GitHub
+only after every blocking job passed. It is a development pipeline for Packmon
 itself, not a Packmon scan, and it does not run `ci/gitlab/.packmon-scan.yml`.
+
+Packmon overrides three template jobs. `go-test` and `go-test-race` first
+provide the tools the test suites require instead of skipping: Chromium for
+the HTML report browser tests (`PACKMON_BROWSER_BIN`), Node.js with `npm ci`
+for the ESLint, Stylelint, and `.npmrc` contracts, the Docker CLI with the
+Compose plugin for the `docker compose config` contracts (no daemon), and
+golangci-lint for its configuration contract; they exclude `node_modules`
+from the package list like the Makefile's `GO_PACKAGES`. The `golangci-lint`
+job uses the Makefile's pinned linter version so local and CI runs agree. The
+repository `.gitleaks.toml` keeps the shared gitleaks policy and additionally
+allowlists only the made-up keys in the `internal/logsafe` redaction fixtures.
 
 The GitLab consumer template parses `feed_status`, `db_stale`, and
 `db_age_days` from the JSON result artifact and writes degraded coverage into

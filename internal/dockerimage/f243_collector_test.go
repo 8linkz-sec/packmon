@@ -18,7 +18,7 @@ func TestF243CollectorReachableErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenRoot: %v", err)
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	if _, err := parseFileFromRoot(root, File{RelPath: "..", Kind: KindDockerfile}); err == nil {
 		t.Fatal("parseFileFromRoot(escape) error = nil")
 	}

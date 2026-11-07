@@ -1222,6 +1222,20 @@ environment) are replaced by the local verification gate in `CONTRIBUTING.md`;
 there is no hosted release pipeline or release environment approval left to
 protect. Run Trivy image and filesystem scans locally before shipping images
 (see `docs/runbook.md` -> "Container image vulnerability scans").
+
+Since November 2026 a self-hosted GitLab pipeline (`.gitlab-ci.yml`, see
+`DESIGN.md` -> "CI/CD Integration") runs gitleaks as a blocking job, and
+`main` reaches GitHub only through that pipeline's last job, after every
+blocking job passed; it pushes fast-forward only with a write deploy key
+scoped to this one repository and never overwrites a diverged branch. The
+repository `.gitleaks.toml` extends the default rules; besides the shared
+made-up-fixture allowlist for `generic-api-key`, it exempts only
+`internal/logsafe/testdata/` and the two logsafe redaction test files, whose
+PEM blocks and tokens are deliberate test inputs and golden outputs. Every
+other detector, including `private-key`, stays active for the whole tree.
+The test jobs fetch their tools through verified channels only: Debian
+packages through signed apt repositories, Node.js against its published
+SHA-256, and golangci-lint as a module checked by the Go checksum database.
 The maintained Dockerfile pins every Alpine runtime package to an exact
 version. Runtime-package pin changes must be verified by rebuilding the affected
 runtime stages without their cached package-install layers, because a warm

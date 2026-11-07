@@ -82,7 +82,7 @@ func TestPackageNameRepairHelpersReportCountsAndScanFailures(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			ctx := context.WithValue(context.Background(), struct{}{}, tc.name)
+			ctx := context.WithValue(context.Background(), packageNameRepairTestContextKey{}, tc.name)
 			querier := &packageNameRepairQuerier{row: tc.row}
 			got, err := tc.run(ctx, querier)
 			if got != tc.wantCount {
@@ -109,3 +109,6 @@ func TestPackageNameRepairHelpersReportCountsAndScanFailures(t *testing.T) {
 		})
 	}
 }
+
+// packageNameRepairTestContextKey marks the context the fault tests pass through.
+type packageNameRepairTestContextKey struct{}

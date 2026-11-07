@@ -189,7 +189,7 @@ frame.addEventListener("load", function () {
 frame.srcdoc = %s;
 </script></body></html>`, reportJSON)
 	harnessPath := filepath.Join(t.TempDir(), "layout-harness.html")
-	if err := os.WriteFile(harnessPath, []byte(harness), 0o600); err != nil {
+	if err := os.WriteFile(harnessPath, []byte(harness), 0o600); err != nil { // #nosec G703 -- harnessPath is a t.TempDir path.
 		t.Fatalf("write layout measurement harness: %v", err)
 	}
 	return harnessPath

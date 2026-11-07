@@ -303,7 +303,7 @@ func TestReadmeHasTroubleshootingSection(t *testing.T) {
 }
 
 func validComposeEnvironment() map[string]string {
-	return map[string]string{
+	return map[string]string{ // #nosec G101 -- fake bootstrap environment values.
 		"POSTGRES_DB":                     "packmon",
 		"POSTGRES_USER":                   "packmon",
 		"POSTGRES_PASSWORD":               "test-postgres-password",
@@ -359,11 +359,11 @@ func stageComposeFiles(t *testing.T, names []string) string {
 	t.Helper()
 	stage := t.TempDir()
 	for _, name := range names {
-		data, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(name))) //nolint:gosec // fixed repository fixture selected by test
+		data, err := os.ReadFile(filepath.Join("..", "..", filepath.FromSlash(name)))
 		if err != nil {
 			t.Fatalf("read %s: %v", name, err)
 		}
-		if err := os.WriteFile(filepath.Join(stage, filepath.Base(name)), data, 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(stage, filepath.Base(name)), data, 0o600); err != nil { // #nosec G703 -- stage is t.TempDir and name a fixed repository file.
 			t.Fatalf("stage %s: %v", name, err)
 		}
 	}

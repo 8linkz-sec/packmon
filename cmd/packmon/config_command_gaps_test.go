@@ -79,7 +79,7 @@ func TestConfigInitRefusesExistingFileWithoutChangingIt(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("config init error = %v, want existing-file refusal", err)
 	}
-	got, readErr := os.ReadFile(path)
+	got, readErr := os.ReadFile(path) // #nosec G304 -- path is a t.TempDir fixture.
 	if readErr != nil {
 		t.Fatalf("read sentinel: %v", readErr)
 	}
@@ -100,7 +100,7 @@ func TestConfigInitRefusesFileCreatedImmediatelyBeforeExclusiveCreate(t *testing
 		if gotTarget != target {
 			return errors.New("before-create hook received unexpected target")
 		}
-		if err := os.WriteFile(gotTarget, want, 0o640); err != nil {
+		if err := os.WriteFile(gotTarget, want, 0o640); err != nil { // #nosec G306 -- deliberately differs from the 0600 the command writes, so a replacement shows in the mode check.
 			return err
 		}
 		info, err := os.Stat(gotTarget)
@@ -125,7 +125,7 @@ func TestConfigInitRefusesFileCreatedImmediatelyBeforeExclusiveCreate(t *testing
 	if output != "" {
 		t.Fatalf("config init output = %q, want no success output", output)
 	}
-	got, readErr := os.ReadFile(target)
+	got, readErr := os.ReadFile(target) // #nosec G304 -- target is a t.TempDir fixture.
 	if readErr != nil {
 		t.Fatalf("read intervening file: %v", readErr)
 	}
@@ -215,7 +215,7 @@ func TestConfigInitReportsDirectoryAndWriteFailures(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "create config directory") {
 			t.Fatalf("config init error = %v, want directory creation failure", err)
 		}
-		got, readErr := os.ReadFile(parent)
+		got, readErr := os.ReadFile(parent) // #nosec G304 -- parent is a t.TempDir fixture.
 		if readErr != nil {
 			t.Fatalf("read parent sentinel: %v", readErr)
 		}
@@ -313,11 +313,11 @@ func TestConfiguredAPIKeyEnvVarsDeduplicatesAndHandlesNil(t *testing.T) {
 		t.Fatalf("configuredAPIKeyEnvVars(nil) = %v, want nil", got)
 	}
 
-	cfg := &cliConfig{
+	cfg := &cliConfig{ // #nosec G101 -- environment variable names, not credentials.
 		APIKeyEnv: " CUSTOM_KEY ",
 		Repos: []cliRepoConfig{
 			{APIKeyEnv: "CUSTOM_KEY"},
-			{APIKeyEnv: "PACKMON_API_KEY"},
+			{APIKeyEnv: "PACKMON_API_KEY"}, // #nosec G101 -- environment variable name, not a credential.
 			{APIKeyEnv: "SECOND_KEY"},
 			{APIKeyEnv: " "},
 			{APIKeyEnv: "SECOND_KEY"},
@@ -440,7 +440,7 @@ func TestConfigInitResolvedSymlinkDoesNotChangeExternalReferent(t *testing.T) {
 	link := filepath.Join(linkTree, "packmon.yaml")
 	referent := filepath.Join(externalTree, "existing-outside-link-tree.yaml")
 	want := []byte("sentinel: preserve exactly\n")
-	if err := os.WriteFile(referent, want, 0o640); err != nil {
+	if err := os.WriteFile(referent, want, 0o600); err != nil {
 		t.Fatalf("write external referent: %v", err)
 	}
 	wantInfo, err := os.Stat(referent)
@@ -473,7 +473,7 @@ func TestConfigInitResolvedSymlinkDoesNotChangeExternalReferent(t *testing.T) {
 		t.Fatalf("config symlink target = %q, want unchanged %q", gotTarget, referent)
 	}
 
-	got, readErr := os.ReadFile(referent)
+	got, readErr := os.ReadFile(referent) // #nosec G304 -- referent is a t.TempDir fixture.
 	if readErr != nil {
 		t.Fatalf("read external referent after config init: %v", readErr)
 	}

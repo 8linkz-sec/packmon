@@ -33,7 +33,7 @@ func TestGeneratedHTMLReportLocaleScriptExecutesFormattingContracts(t *testing.T
 	const nodeTimeout = 10 * time.Second
 	ctx, cancel := context.WithTimeout(t.Context(), nodeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, node, "-e", reportLocaleNodeHarness, encoded)
+	cmd := exec.CommandContext(ctx, node, "-e", reportLocaleNodeHarness, encoded) // #nosec G204 -- node resolved via LookPath; fixed harness script.
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {

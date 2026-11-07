@@ -13,7 +13,7 @@ import (
 func TestOverlayCLIConfigCopiesConfiguredTrustedSections(t *testing.T) {
 	enabled := true
 	dst := cliConfig{}
-	src := cliConfig{
+	src := cliConfig{ // #nosec G101 -- fake test credentials.
 		Server:            "https://packmon.example",
 		APIKey:            "api-key",
 		APIKeyEnv:         "PACKMON_CUSTOM_KEY",

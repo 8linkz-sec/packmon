@@ -99,8 +99,8 @@ func TestF244ParseComposeImagesRejectsReachableWrongNodeShapes(t *testing.T) {
 func TestF244ParseComposeImagesRedactsMergedInvalidImageWithoutDirectLine(t *testing.T) {
 	// The merged image is decoded into the service but has no direct image key
 	// in that service node, which reaches the line-number fallback.
-	//nolint:gosec // G101: fixture credential, deliberately fake.
-	const raw = "https://user:token@example.internal/private/app"
+	const raw = "https://user:token@example.internal/private/app" // #nosec G101 -- fixture credential, deliberately fake.
+	// #nosec G101 -- fixture credential, deliberately fake.
 	input := `
 x-service: &service-defaults
   image: https://user:token@example.internal/private/app

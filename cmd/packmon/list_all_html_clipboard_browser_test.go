@@ -96,7 +96,7 @@ func TestGeneratedListAllHTMLClipboardInteractionContract(t *testing.T) {
 			if got := strings.Count(instrumented, cliHTMLReportCSPMeta); got != 1 {
 				t.Fatalf("instrumented report CSP count = %d, want the original CSP unchanged", got)
 			}
-			if err := os.WriteFile(reportPath, []byte(instrumented), 0o600); err != nil {
+			if err := os.WriteFile(reportPath, []byte(instrumented), 0o600); err != nil { // #nosec G703 -- reportPath is a t.TempDir path.
 				t.Fatalf("write instrumented list-all report: %v", err)
 			}
 

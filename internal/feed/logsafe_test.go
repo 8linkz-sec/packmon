@@ -48,7 +48,7 @@ func TestSafeDiagnosticMessageHandlesRenderedValuesDirectly(t *testing.T) {
 	})
 
 	t.Run("redacted exact byte bound", func(t *testing.T) {
-		const secret = "f271-rendered-secret"
+		const secret = "f271-rendered-secret" // #nosec G101 -- fake secret the test proves is redacted.
 		raw := "sync failed password=" + secret + " " + strings.Repeat("x", maxFeedDiagnosticBytes*2)
 		got := SafeDiagnosticMessage(raw)
 		if len(got) != maxFeedDiagnosticBytes {

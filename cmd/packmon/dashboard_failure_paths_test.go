@@ -32,7 +32,7 @@ func TestMain(m *testing.M) {
 		if err != nil {
 			os.Exit(2)
 		}
-		if err := os.WriteFile(capturePath, captured, 0o600); err != nil {
+		if err := os.WriteFile(capturePath, captured, 0o600); err != nil { // #nosec G703 -- capturePath is a t.TempDir path.
 			os.Exit(2)
 		}
 		os.Exit(0)
