@@ -11,6 +11,8 @@ include:
       - templates/gitleaks.yml
       - templates/sonarqube.yml
       - templates/sbom-dtrack.yml
+      # Publishes main to GitHub after a green pipeline, once GITHUB_PUSH_TOKEN is set.
+      - templates/github-push.yml
 
 variables:
   # package.json only has these scripts; build:web regenerates the committed tailwind.css and htmx.min.js.
