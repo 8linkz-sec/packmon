@@ -492,7 +492,7 @@ func TestRelDisplayNeverReturnsAbsoluteHostPath(t *testing.T) {
 		{name: "whitespace", path: "   ", want: "chocolatey-inventory-file"},
 		{name: "absolute file", path: absFile, want: "sensitive.ps1"},
 		{name: "absolute root", path: absRoot, want: "chocolatey-inventory-file"},
-		{name: "relative path", path: "scripts\\install.ps1", want: "scripts/install.ps1"},
+		{name: "relative path", path: filepath.Join("scripts", "install.ps1"), want: "scripts/install.ps1"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := relDisplay(tt.path); got != tt.want {

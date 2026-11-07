@@ -74,8 +74,8 @@ func TestAnnotateFindingLocationsDeduplicatesAndKeepsPackageBoundaries(t *testin
 	}
 	entries := []CollectedPackage{
 		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: "package-lock.json"},
-		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: "nested\\package-lock.json"},
-		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: "nested\\package-lock.json"},
+		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: filepath.Join("nested", "package-lock.json")},
+		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: filepath.Join("nested", "package-lock.json")},
 		{Package: domain.Package{Name: "left-pad", Version: "1.3.0", Ecosystem: domain.Ecosystem("npm")}, SourceFile: "  "},
 	}
 
