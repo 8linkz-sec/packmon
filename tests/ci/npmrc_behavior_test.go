@@ -1,12 +1,45 @@
 package ci
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func TestTailwindWASMBundledDependenciesAreLocked(t *testing.T) {
+	t.Parallel()
+
+	var lockfile struct {
+		Packages map[string]struct {
+			BundleDependencies []string `json:"bundleDependencies"`
+			InBundle           bool     `json:"inBundle"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(readRepoFile(t, "package-lock.json")), &lockfile); err != nil {
+		t.Fatalf("parse package-lock.json: %v", err)
+	}
+
+	const parent = "node_modules/@tailwindcss/oxide-wasm32-wasi"
+	for _, name := range []string{"@emnapi/core", "@emnapi/runtime"} {
+		if !slices.Contains(lockfile.Packages[parent].BundleDependencies, name) {
+			t.Errorf("%s bundleDependencies does not contain %q", parent, name)
+		}
+
+		path := parent + "/node_modules/" + name
+		entry, ok := lockfile.Packages[path]
+		if !ok {
+			t.Errorf("package-lock.json does not contain bundled package entry %q", path)
+			continue
+		}
+		if !entry.InBundle {
+			t.Errorf("package-lock.json entry %q does not set inBundle", path)
+		}
+	}
+}
 
 func TestNPMRCEnforcesNodeEngineAndDisablesLifecycleScripts(t *testing.T) {
 	t.Parallel()

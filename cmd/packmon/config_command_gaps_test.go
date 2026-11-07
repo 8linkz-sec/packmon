@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -221,7 +222,7 @@ func TestConfigInitReportsDirectoryAndWriteFailures(t *testing.T) {
 		if string(got) != string(want) {
 			t.Fatalf("parent sentinel changed: got %q, want %q", got, want)
 		}
-		if _, statErr := os.Lstat(target); !errors.Is(statErr, os.ErrNotExist) {
+		if _, statErr := os.Lstat(target); !errors.Is(statErr, os.ErrNotExist) && !errors.Is(statErr, syscall.ENOTDIR) {
 			t.Fatalf("target state error = %v, want absent", statErr)
 		}
 	})
