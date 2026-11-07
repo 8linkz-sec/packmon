@@ -1236,6 +1236,9 @@ other detector, including `private-key`, stays active for the whole tree.
 The test jobs fetch their tools through verified channels only: Debian
 packages through signed apt repositories, Node.js against its published
 SHA-256, and golangci-lint as a module checked by the Go checksum database.
+Every pipeline can write to the runner's shared cache, so the jobs never
+execute a tool from it: a cached archive is copied out and re-verified on each
+run, and tools are unpacked or built into job-local directories.
 The maintained Dockerfile pins every Alpine runtime package to an exact
 version. Runtime-package pin changes must be verified by rebuilding the affected
 runtime stages without their cached package-install layers, because a warm

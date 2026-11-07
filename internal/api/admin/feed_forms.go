@@ -476,7 +476,7 @@ func (h *AdminHandler) resetAndPersistFeedConfig(r *http.Request, feedName strin
 }
 
 func redirectAdminFeedsError(w http.ResponseWriter, r *http.Request, message, feedName string) {
-	http.Redirect(w, r, adminFeedsRedirectURL("err", message, feedName), http.StatusSeeOther)
+	http.Redirect(w, r, adminFeedsRedirectURL("err", message, feedName), http.StatusSeeOther) // #nosec G710 -- adminFeedsRedirectURL always returns the fixed relative path /admin/feeds.
 }
 
 func adminFeedsRedirectURL(key, message, feedName string) string {

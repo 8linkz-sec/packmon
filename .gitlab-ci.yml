@@ -31,7 +31,10 @@ variables:
 #   docker CLI+compose  `docker compose config` contracts in tests/ci (no daemon is used)
 #   golangci-lint       configuration contract in tests/ci (same version as the Makefile pin)
 # Debian packages are signature-checked by apt; Node is checked against the official SHA-256; golangci-lint
-# is built from its module, checked by the Go checksum database. Downloads are cached in the shared /cache.
+# is built from its module, checked by the Go checksum database. Every pipeline can write to the shared /cache,
+# so nothing is executed from it: the cached Node archive is copied out and re-verified on every run, and both
+# tools are unpacked or built into job-local directories. apt keeps no shared cache (concurrent jobs would
+# contend for its lock).
 .packmon-test-tools:
   variables:
     NODE_VERSION: "26.13.0"
@@ -40,24 +43,24 @@ variables:
     PACKMON_BROWSER_BIN: /usr/bin/chromium
     DEBIAN_FRONTEND: noninteractive
   before_script:
-    - mkdir -p /cache/apt/partial /cache/tools
+    - mkdir -p /cache/tools
     - apt-get update -qq
-    - apt-get install -y -qq --no-install-recommends -o Dir::Cache::Archives=/cache/apt chromium docker-cli docker-compose >/dev/null
+    - apt-get install -y -qq --no-install-recommends chromium docker-cli docker-compose >/dev/null
     - |
-      node_dir="/cache/tools/node-v${NODE_VERSION}"
-      if [ ! -x "$node_dir/bin/node" ]; then
-        tmp="$(mktemp -d)"
-        curl -fsSLo "$tmp/node.tar.gz" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz"
-        echo "${NODE_SHA256}  $tmp/node.tar.gz" | sha256sum -c -
-        mkdir "$tmp/node" && tar -xzf "$tmp/node.tar.gz" -C "$tmp/node" --strip-components=1
-        # Concurrent jobs may race here; whichever rename lands first wins, the other copy is dropped.
-        mv -T "$tmp/node" "$node_dir" 2>/dev/null || rm -rf "$tmp/node"
-        rm -rf "$tmp"
+      node_dir="$(mktemp -d)"
+      node_tgz="$node_dir/node.tar.gz"
+      cached_tgz="/cache/tools/node-v${NODE_VERSION}-linux-x64.tar.gz"
+      cp "$cached_tgz" "$node_tgz" 2>/dev/null || true
+      if ! echo "${NODE_SHA256}  $node_tgz" | sha256sum -c --status - 2>/dev/null; then
+        curl -fsSLo "$node_tgz" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz"
+        echo "${NODE_SHA256}  $node_tgz" | sha256sum -c -
+        cp "$node_tgz" "$cached_tgz.$$" && mv -f "$cached_tgz.$$" "$cached_tgz"
       fi
+      tar -xzf "$node_tgz" -C "$node_dir" --strip-components=1
       export PATH="$node_dir/bin:$PATH"
     - |
-      lint_dir="/cache/tools/golangci-lint-${GOLANGCI_LINT_VERSION}"
-      [ -x "$lint_dir/golangci-lint" ] || GOBIN="$lint_dir" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
+      lint_dir="$(mktemp -d)"
+      GOBIN="$lint_dir" go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}"
       export PATH="$lint_dir:$PATH"
     - node --version && npm --version && docker compose version && chromium --version && golangci-lint version
     - npm ci --no-audit --no-fund
