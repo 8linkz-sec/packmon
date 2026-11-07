@@ -1731,6 +1731,14 @@ with the hosted CI setup. The GitLab shared CI template
 (`ci/gitlab/.packmon-scan.yml`) is still in the repository but is not run by
 any pipeline here.
 
+Since November 2026 the root `.gitlab-ci.yml` runs this repository's own
+checks on the operator's self-hosted GitLab instance. It only includes the
+operator's shared CI templates: `go vet`, `go test` with and without `-race`,
+`golangci-lint`, `govulncheck`, the web asset lint and build scripts from
+`package.json`, `npm audit`, gitleaks, a SonarQube analysis, and a CycloneDX
+SBOM upload to Dependency-Track. It is a development pipeline for Packmon
+itself, not a Packmon scan, and it does not run `ci/gitlab/.packmon-scan.yml`.
+
 The GitLab consumer template parses `feed_status`, `db_stale`, and
 `db_age_days` from the JSON result artifact and writes degraded coverage into
 the job log independently from finding count or exit-code mapping. No GitHub
