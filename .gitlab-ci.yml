@@ -11,7 +11,7 @@ include:
       - templates/gitleaks.yml
       - templates/sonarqube.yml
       - templates/sbom-dtrack.yml
-      # Publishes main to GitHub after a green pipeline, once GITHUB_PUSH_TOKEN is set.
+      # Publishes main to GitHub after a green pipeline, once the GITHUB_DEPLOY_KEY file variable is set.
       - templates/github-push.yml
 
 variables:
