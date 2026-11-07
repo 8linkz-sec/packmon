@@ -35,9 +35,10 @@ variables:
 .packmon-test-tools:
   variables:
     NODE_VERSION: "26.13.0"
-    NODE_SHA256: d28a96af6c38596f6d9d97c0ee531c13d238d757742387d1928de822d959e997
+    NODE_SHA256: 5848553868b402d3fabb5b09270649977780a390f832155721025a08b5104455
     GOLANGCI_LINT_VERSION: v2.14.0
     PACKMON_BROWSER_BIN: /usr/bin/chromium
+    DEBIAN_FRONTEND: noninteractive
   before_script:
     - mkdir -p /cache/apt/partial /cache/tools
     - apt-get update -qq
@@ -46,9 +47,9 @@ variables:
       node_dir="/cache/tools/node-v${NODE_VERSION}"
       if [ ! -x "$node_dir/bin/node" ]; then
         tmp="$(mktemp -d)"
-        curl -fsSLo "$tmp/node.tar.xz" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"
-        echo "${NODE_SHA256}  $tmp/node.tar.xz" | sha256sum -c -
-        mkdir "$tmp/node" && tar -xJf "$tmp/node.tar.xz" -C "$tmp/node" --strip-components=1
+        curl -fsSLo "$tmp/node.tar.gz" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz"
+        echo "${NODE_SHA256}  $tmp/node.tar.gz" | sha256sum -c -
+        mkdir "$tmp/node" && tar -xzf "$tmp/node.tar.gz" -C "$tmp/node" --strip-components=1
         # Concurrent jobs may race here; whichever rename lands first wins, the other copy is dropped.
         mv -T "$tmp/node" "$node_dir" 2>/dev/null || rm -rf "$tmp/node"
         rm -rf "$tmp"
