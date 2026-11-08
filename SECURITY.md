@@ -1220,8 +1220,9 @@ removed in August 2026. The former hosted gates (release attestations, Trivy
 image and filesystem scans, secret scanning, the protected `release`
 environment) are replaced by the local verification gate in `CONTRIBUTING.md`;
 there is no hosted release pipeline or release environment approval left to
-protect. Run Trivy image and filesystem scans locally before shipping images
-(see `docs/runbook.md` -> "Container image vulnerability scans").
+protect. The GitLab pipeline below builds and Trivy-scans both images on every
+`main` push; a local Trivy filesystem scan still covers the repository
+lockfiles (see `docs/runbook.md` -> "Container image vulnerability scans").
 
 Since November 2026 a self-hosted GitLab pipeline (`.gitlab-ci.yml`, see
 `DESIGN.md` -> "CI/CD Integration") runs gitleaks as a blocking job, and

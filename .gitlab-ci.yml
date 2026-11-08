@@ -11,10 +11,14 @@ include:
       - templates/gitleaks.yml
       - templates/sonarqube.yml
       - templates/sbom-dtrack.yml
+      # Builds the server and cli images, scans them with Trivy, uploads one SBOM per image to Dependency-Track.
+      - templates/container.yml
       # Publishes main to GitHub after a green pipeline, once the GITHUB_DEPLOY_KEY file variable is set.
       - templates/github-push.yml
 
 variables:
+  # The two Dockerfile targets that ship (name:context:dockerfile:target); compose builds both from the root.
+  CONTAINER_IMAGES: "server:.:Dockerfile:server cli:.:Dockerfile:cli"
   # package.json only has these scripts; build:web regenerates the committed tailwind.css and htmx.min.js.
   NODE_SCRIPTS: "lint:web lint:openapi build:web"
   # As in templates/go.yml, plus the generated/vendored web assets.

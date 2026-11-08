@@ -1735,9 +1735,16 @@ Since November 2026 the root `.gitlab-ci.yml` runs this repository's own
 checks on the operator's self-hosted GitLab instance. It includes the
 operator's shared CI templates: `go vet`, `go test` with and without `-race`,
 `golangci-lint`, `govulncheck`, the web asset lint and build scripts from
-`package.json`, `npm audit`, gitleaks, a SonarQube analysis, a CycloneDX
-SBOM upload to Dependency-Track, and a final job that pushes `main` to GitHub
-only after every blocking job passed. It is a development pipeline for Packmon
+`package.json`, `npm audit`, gitleaks, a SonarQube analysis that blocks on
+the quality gate (only code the push changed counts), a CycloneDX SBOM upload
+to Dependency-Track, a container scan, and a final job that pushes `main` to
+GitHub only after every blocking job passed. The container scan builds the
+`server` and `cli` Dockerfile targets with rootless BuildKit on a dedicated
+runner, scans each image with Trivy, and blocks on HIGH or CRITICAL
+vulnerabilities that have a fixed version and on secrets in the image;
+unfixed vulnerabilities only reach Dependency-Track, where each image gets its
+own project under the repository's project. Accepted findings would go into
+`.trivyignore` with a reason. It is a development pipeline for Packmon
 itself, not a Packmon scan, and it does not run `ci/gitlab/.packmon-scan.yml`.
 
 Packmon overrides three template jobs. `go-test` and `go-test-race` first

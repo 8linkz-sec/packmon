@@ -961,8 +961,11 @@ page load.
 
 ### Container image vulnerability scans
 
-The hosted CI gates were removed with the GitHub workflows; run the scans
-locally before shipping images:
+The GitLab pipeline's `container-scan` job builds the `server` and `cli`
+targets on every `main` push and blocks on HIGH or CRITICAL vulnerabilities
+that have a fixed version and on secrets in the image; unfixed findings go to
+Dependency-Track only. To check an image before pushing, or to scan the
+lockfiles, run the scans locally:
 
 ```bash
 docker build --target server -t packmon-server:local .
