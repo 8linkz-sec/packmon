@@ -21,7 +21,7 @@
     "eslint": "10.14.0",
     "htmx.org": "2.0.11",
     "stylelint": "17.16.0",
-    "tailwindcss": "4.3.3"
+    "tailwindcss": "4.3.4"
   },
   "overrides": {
     "@parcel/watcher": "2.6.0",
