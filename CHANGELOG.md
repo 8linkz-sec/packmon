@@ -44,6 +44,12 @@
   having an update path merely because an unknown installed version differs
   from a known latest tag. Explicit update results and advisory fixed versions
   still render as available updates.
+- Clean server and CLI container builds no longer break when Alpine retires a
+  package version: the runtime stages stopped pinning `ca-certificates`, `git`,
+  and `tzdata` to exact versions (Alpine 3.24 had replaced the pinned
+  `git=2.54.0-r0` with `2.54.1-r0`) and now run `apk upgrade --no-cache`
+  before installing those packages unversioned, so every build carries
+  Alpine's current security updates on top of the digest-pinned base image.
 - Clean server and CLI container builds work again with Alpine 3.24 after
   updating their exact `tzdata` package pin from `2026e-r0`, which the current
   repository no longer provides, to `2026f-r0`. The digest-pinned Alpine base

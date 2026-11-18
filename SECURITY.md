@@ -1240,11 +1240,14 @@ SHA-256, and golangci-lint as a module checked by the Go checksum database.
 Every pipeline can write to the runner's shared cache, so the jobs never
 execute a tool from it: a cached archive is copied out and re-verified on each
 run, and tools are unpacked or built into job-local directories.
-The maintained Dockerfile pins every Alpine runtime package to an exact
-version. Runtime-package pin changes must be verified by rebuilding the affected
-runtime stages without their cached package-install layers, because a warm
-BuildKit cache can hide a package version that is no longer available from the
-configured Alpine repository.
+The maintained Dockerfile does not pin Alpine runtime packages: each runtime
+stage runs `apk upgrade --no-cache` and then installs its packages unversioned,
+so every image build takes the distribution's current security updates on top
+of the digest-pinned base image and never fails because Alpine retired an exact
+package version. `tests/ci` rejects a version-pinned runtime package and a
+missing upgrade step. A warm BuildKit cache reuses an earlier package-install
+layer, so a build meant to pick up new Alpine security updates must run without
+the cache (`docker build --no-cache`).
 
 `ci/gitlab/.packmon-scan.yml` remains in the repository only as an unoperated
 consumer template. No pipeline in this deployment runs it, its CI/CD delivery
