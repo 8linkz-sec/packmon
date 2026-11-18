@@ -42,8 +42,9 @@ func TestNonGoFormattingGateIsConfigured(t *testing.T) {
 		"internal/web/static/tailwind.css",
 		"internal/web/static/htmx.min.js",
 		"docs/vendor/*",
-		`grep -q $'\r'`,
-		`grep -n '[[:blank:]]$'`,
+		`grep -Uq $'\r'`,
+		`grep -Uqv $'^[^\r]*\r$'`,
+		`grep -Un $'[[:blank:]]\r\{0,1\}$'`,
 		"tail -c 1",
 	} {
 		if !strings.Contains(script, want) {
