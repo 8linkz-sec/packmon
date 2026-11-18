@@ -110,7 +110,7 @@ func TestWebAssetAndOpenAPILintScriptsArePinned(t *testing.T) {
 	for name, wantVersion := range map[string]string{
 		"@eslint/js":   "10.0.1",
 		"@redocly/cli": "2.72.1",
-		"eslint":       "10.14.0",
+		"eslint":       "10.15.0",
 		"stylelint":    "17.16.0",
 	} {
 		if got := pkg.DevDependencies[name]; got != wantVersion {
