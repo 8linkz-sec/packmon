@@ -30,6 +30,8 @@ func TestNonGoFormattingGateIsConfigured(t *testing.T) {
 		"[*.go]",
 		"[Makefile]",
 		"[*.{ps1,psm1}]",
+		// .gitattributes checks *.ps1 out with CRLF (`*.ps1 text eol=crlf`).
+		"[*.ps1]\nend_of_line = crlf\n",
 	} {
 		if !strings.Contains(editorconfig, want) {
 			t.Fatalf(".editorconfig missing non-Go formatting marker %q", want)
