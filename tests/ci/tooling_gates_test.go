@@ -30,6 +30,8 @@ func TestNonGoFormattingGateIsConfigured(t *testing.T) {
 		"[*.go]",
 		"[Makefile]",
 		"[*.{ps1,psm1}]",
+		// .gitattributes checks *.ps1 out with CRLF (`*.ps1 text eol=crlf`).
+		"[*.ps1]\nend_of_line = crlf\n",
 	} {
 		if !strings.Contains(editorconfig, want) {
 			t.Fatalf(".editorconfig missing non-Go formatting marker %q", want)
@@ -42,8 +44,9 @@ func TestNonGoFormattingGateIsConfigured(t *testing.T) {
 		"internal/web/static/tailwind.css",
 		"internal/web/static/htmx.min.js",
 		"docs/vendor/*",
-		`grep -q $'\r'`,
-		`grep -n '[[:blank:]]$'`,
+		`grep -Uq $'\r'`,
+		`grep -Uqv $'^[^\r]*\r$'`,
+		`grep -Un $'[[:blank:]]\r\{0,1\}$'`,
 		"tail -c 1",
 	} {
 		if !strings.Contains(script, want) {
