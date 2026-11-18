@@ -9,9 +9,14 @@ import (
 )
 
 const (
-	npmGeneratorVersion  = "5.0.0"
-	pypiGeneratorVersion = "7.3.0"
-	mavenPluginVersion   = "2.9.1"
+	npmGeneratorVersion  = "7.0.1"
+	pypiGeneratorVersion = "8.0.1"
+	mavenPluginVersion   = "2.9.3"
+
+	// cycloneDXSpecVersion is the CycloneDX spec version every generated SBOM
+	// uses. Generators get it explicitly so a generator release that moves its
+	// default (cyclonedx-npm 7 defaults to 1.7) cannot change the format.
+	cycloneDXSpecVersion = "1.6"
 )
 
 // RunOptions describes one external command invocation. Dir is optional and Env

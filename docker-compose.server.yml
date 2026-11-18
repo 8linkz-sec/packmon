@@ -14,7 +14,7 @@ x-logging: &default-logging
 
 services:
   postgres:
-    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461}
+    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:f4b066118f70efeb519d2aac94507f898698f4a145ecb43dd8fd4076f21b1124}
     logging: *default-logging
     command:
       - -c
@@ -70,8 +70,8 @@ services:
         VERSION: ${PACKMON_VERSION:-dev}
         COMMIT: ${PACKMON_COMMIT:-none}
         DATE: ${PACKMON_BUILD_DATE:-unknown}
-        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb}
-        PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a}
+        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.27-alpine}
+        PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24}
     # Operator config comes from .env when present; the explicit block below is
     # the security contract and always wins over env_file. required: false so a
     # deployment that injects config another way (shell env / secrets manager)
@@ -140,8 +140,8 @@ services:
         VERSION: ${PACKMON_VERSION:-dev}
         COMMIT: ${PACKMON_COMMIT:-none}
         DATE: ${PACKMON_BUILD_DATE:-unknown}
-        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb}
-        PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a}
+        PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.27-alpine}
+        PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24}
     command: ["migrate"]
     environment:
       PACKMON_DB_HOST: ${PACKMON_DB_HOST:-postgres}
@@ -167,7 +167,7 @@ services:
 
   packmon-backup:
     profiles: ["manual"]
-    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461}
+    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:f4b066118f70efeb519d2aac94507f898698f4a145ecb43dd8fd4076f21b1124}
     logging: *default-logging
     environment:
       PGHOST: ${PACKMON_DB_HOST:-postgres}

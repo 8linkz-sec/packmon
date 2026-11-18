@@ -777,6 +777,44 @@
   context and could fail. When the bookkeeping or the lock release fails, the
   migrate error now reports that failure together with the migration error.
 
+### Changed
+
+- Container base images follow their line tags without a digest: the Go
+  builder defaults to `golang:1.27-alpine` (was `golang:1.27.3-alpine@sha256`)
+  and the Alpine runtime to `alpine:3.24` (was digest-pinned), in the
+  Dockerfile, both Compose files and `.env.example`, so every fresh or
+  `--pull` build takes the line's current image. The Chainguard PostgreSQL
+  default stays digest-pinned (no public `18` line tag; `latest` would change
+  PostgreSQL majors) and moves from PostgreSQL 18.4 to 18.7.
+- Toolchain and dependencies moved to their latest releases: Go 1.27.4,
+  `go.yaml.in/yaml/v4` (was v3), pgx 5.13.0, libopenapi 0.43.1,
+  modernc.org/sqlite 1.62.0 and the golang.org/x modules; Tailwind CSS
+  4.3.5, Stylelint 18.0.0 and Redocly CLI 2.80.0 (the npm `overrides` are
+  gone, the dependency ranges now resolve the same or newer versions);
+  golangci-lint 2.15.0, gofumpt 0.12.0, govulncheck 1.10.0, gosec 2.30.0,
+  cyclonedx-gomod 1.12.0, go-licenses 2.0.1, actionlint 1.7.12,
+  PSScriptAnalyzer 1.25.0, ShellCheck 0.11.0 and hadolint 2.15.1 for the
+  developer gates; Node.js 26.13.1 in CI. Web asset builds now need Node.js
+  24.15.0 or newer (Stylelint 18 engine floor).
+- The `go.yaml.in/yaml/v4` move keeps how configs, lockfiles and Compose
+  files decode, with two visible differences. YAML type and unknown-field
+  errors now read `yaml: construct errors: line N: ...` on one line (v3
+  printed `yaml: unmarshal errors:` followed by one indented line per error,
+  and `cannot unmarshal` is now `cannot construct`). A fractional number for
+  an integer setting, such as `timeout: 1.5` in a CLI config file, is now
+  rejected instead of being silently truncated to `1`.
+- Auto-SBOM generators move to `@cyclonedx/cyclonedx-npm` 7.0.1 (was 5.0.0)
+  and `cyclonedx-bom` 8.0.1 (was 7.3.0), the same pins as
+  `requirements/packmon-tools.tsv`; `cyclonedx-maven-plugin` moves to 2.9.3
+  (was 2.9.1). Packmon now passes `--spec-version 1.6` to both CLI generators
+  and `-DschemaVersion=1.6` to the Maven plugin, so generated and kept SBOMs
+  stay on CycloneDX 1.6 although `cyclonedx-npm` 7 defaults to 1.7;
+  components and dependency edges are unchanged. Operator action: an existing
+  PATH install of the old generator now fails the version check
+  (`required SBOM generator "cyclonedx-npm"
+  version 7.0.1, found 5.0.0`); rerun once with `--install-tools` to install
+  the pinned release, or run `scripts/bootstrap`.
+
 ### Security updates
 
 - No security fixes pending disclosure.

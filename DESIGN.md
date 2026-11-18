@@ -247,10 +247,16 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   `CONTRIBUTING.md`. Release binaries are built locally from source; the container
   images ship `SECURITY.md` and `LICENSE` (Apache-2.0) but no third-party
   notice files.
-- The maintained Dockerfile and Compose model keep digest-pinned default images
-  but expose `PACKMON_GO_BUILDER_IMAGE`, `PACKMON_ALPINE_RUNTIME_IMAGE`, and
-  `PACKMON_POSTGRES_IMAGE` so operators can substitute internal registry
-  mirrors without changing the supported deployment path.
+- The maintained Dockerfile and Compose model default the Go builder and Alpine
+  runtime images to their line tags without a digest (`golang:1.27-alpine`,
+  `alpine:3.24`), so every fresh or `--pull` build takes the line's current
+  image and its security fixes; a new Go or Alpine line is a deliberate bump.
+  The Chainguard PostgreSQL default stays digest-pinned because the public
+  registry publishes no `18` line tag and `latest` would move PostgreSQL majors
+  under an existing data volume. `PACKMON_GO_BUILDER_IMAGE`,
+  `PACKMON_ALPINE_RUNTIME_IMAGE`, and `PACKMON_POSTGRES_IMAGE` let operators
+  substitute internal registry mirrors without changing the supported
+  deployment path.
 
 The server process still supports containerized and orchestrated operation, but
 the repository no longer maintains first-party Kubernetes deployment packaging.
@@ -521,9 +527,13 @@ Important behavior:
   generated files as timestamped snapshots so repeated runs do not overwrite
   previous SBOMs; `--install-tools` may install missing pinned generator tools
   where automatic installation is supported. Pinned generator versions are
-  `cyclonedx-npm` 5.0.0, `cyclonedx-bom` 7.3.0, and
-  `cyclonedx-maven-plugin` 2.9.1. Existing PATH tools for npm and PyPI are
-  version-checked before use. Manifest reads, generator output capture, and
+  `cyclonedx-npm` 7.0.1, `cyclonedx-bom` 8.0.1, and
+  `cyclonedx-maven-plugin` 2.9.3. The npm and PyPI generators are passed
+  `--spec-version 1.6`, the Maven plugin `-DschemaVersion=1.6`, and the Go
+  generator writes 1.6, so every generated SBOM uses CycloneDX 1.6 regardless
+  of a generator's own default (`cyclonedx-npm` 7 defaults to 1.7). Existing
+  PATH tools for npm and PyPI are version-checked before use. Manifest reads,
+  generator output capture, and
   generated-SBOM validation are size-bounded, and cleanup failures are returned
   as operational errors instead of being silently ignored. The Go generator
   captures `go list` stdout as data separately from the bounded stderr

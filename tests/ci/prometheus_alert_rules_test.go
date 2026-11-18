@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 const promtoolUnavailable = "promtool is not installed; skipping Prometheus starter rule evaluation"

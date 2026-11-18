@@ -975,8 +975,8 @@ trivy image --severity HIGH,CRITICAL packmon-cli:local
 trivy fs --severity HIGH,CRITICAL .
 ```
 
-The image scans block on HIGH and CRITICAL OS package CVEs against the
-repository-pinned base image digests; the filesystem scan covers repository
+The image scans block on HIGH and CRITICAL OS package CVEs in the images built
+from the repository's base-image line tags; the filesystem scan covers repository
 lockfiles for library vulnerabilities.
 
 On Windows hosts without `make`, build the binaries and point the integration

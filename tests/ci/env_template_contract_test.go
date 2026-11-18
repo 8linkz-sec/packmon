@@ -114,7 +114,7 @@ func TestEnvExampleKeepsBootstrapSecretsEmptyAndOptionalCredentialsCommented(t *
 	}
 }
 
-func TestEnvExampleImageOverridesAreDigestPinnedAndMatchRuntimeDefaults(t *testing.T) {
+func TestEnvExampleImageOverridesFollowPinPolicyAndMatchRuntimeDefaults(t *testing.T) {
 	t.Parallel()
 
 	assignments := parseEnvTemplateAssignments(t, repoFile(t, ".env.example"))
@@ -124,12 +124,17 @@ func TestEnvExampleImageOverridesAreDigestPinnedAndMatchRuntimeDefaults(t *testi
 			values[assignment.key] = assignment.value
 		}
 	}
-	digestPinned := regexp.MustCompile(`^[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$`)
+	// Base images are line tags without digest (see goBuilderLineImage); only
+	// the PostgreSQL image keeps its digest (see hardenedPostgresImage).
 	dockerfile := repoFile(t, "Dockerfile")
-	for _, key := range []string{"PACKMON_GO_BUILDER_IMAGE", "PACKMON_ALPINE_RUNTIME_IMAGE", "PACKMON_POSTGRES_IMAGE"} {
+	for key, want := range map[string]string{
+		"PACKMON_GO_BUILDER_IMAGE":     goBuilderLineImage,
+		"PACKMON_ALPINE_RUNTIME_IMAGE": alpineRuntimeLineImage,
+		"PACKMON_POSTGRES_IMAGE":       hardenedPostgresImage,
+	} {
 		value := values[key]
-		if !digestPinned.MatchString(value) {
-			t.Errorf(".env.example %s = %q, want tag plus sha256 digest", key, value)
+		if value != want {
+			t.Errorf(".env.example %s = %q, want %q", key, value, want)
 		}
 		if key != "PACKMON_POSTGRES_IMAGE" && !strings.Contains(dockerfile, "ARG "+key+"="+value+"\n") {
 			t.Errorf("Dockerfile default for %s does not match .env.example value %q", key, value)

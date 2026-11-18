@@ -26,10 +26,10 @@ printf '%s\n' "$log_line" >> "$STUB_LOG"
 printf 'start\t%s\n' "$log_line" >> "$STUB_EVENT_LOG"
 
 if [ "$tool" = "gofumpt" ] && [ "${1-}" = "-version" ]; then
-	printf '%s\n' 'gofumpt v0.9.2'
+	printf '%s\n' 'gofumpt v0.12.0'
 fi
 if [ "$tool" = "golangci-lint" ] && [ "${1-}" = "version" ]; then
-	printf '%s\n' 'golangci-lint has version 2.14.0'
+	printf '%s\n' 'golangci-lint has version 2.15.0'
 fi
 
 if [ "$tool" = "npm" ] && [ "${1-}" = "ci" ] && [ -n "${NPM_BARRIER_DIR-}" ]; then

@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
-ARG PACKMON_GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb
-ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+ARG PACKMON_GO_BUILDER_IMAGE=golang:1.27-alpine
+ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24
 
-# DL3006: hadolint does not resolve ARG defaults; both base-image ARGs above
-# are tag+digest pinned.
+# Both base images follow their line tags without a digest, so every fresh or
+# --pull build takes the line's current image and its security fixes; a new
+# Go or Alpine line is a deliberate edit here (tests/ci checks the policy).
+# DL3006: hadolint does not resolve ARG defaults; both ARGs above are tagged.
 # hadolint ignore=DL3006
 FROM ${PACKMON_GO_BUILDER_IMAGE} AS build
 
@@ -47,11 +49,16 @@ COPY --from=build /packmon-server /usr/local/bin/packmon-server
 COPY SECURITY.md /usr/share/doc/packmon/SECURITY.md
 COPY LICENSE /usr/share/doc/packmon/LICENSE
 
+# DL3066: packmon is the system user created above; the image needs no host
+# uid mapping.
+# hadolint ignore=DL3066
 USER packmon
 ENV PACKMON_SERVER_PORT=8080
 ENV PACKMON_METRICS_PORT=9090
 EXPOSE ${PACKMON_SERVER_PORT} ${PACKMON_METRICS_PORT}
 
+# DL3025: the probe needs a shell to choose http or https from the TLS env.
+# hadolint ignore=DL3025
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD scheme=http; \
       wget_opts="-qO-"; \
@@ -78,5 +85,8 @@ COPY --from=build /packmon /usr/local/bin/packmon
 COPY SECURITY.md /usr/share/doc/packmon/SECURITY.md
 COPY LICENSE /usr/share/doc/packmon/LICENSE
 
+# DL3066: packmon is the system user created above; the image needs no host
+# uid mapping.
+# hadolint ignore=DL3066
 USER packmon
 ENTRYPOINT ["packmon"]

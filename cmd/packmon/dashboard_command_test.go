@@ -46,7 +46,8 @@ func TestDashboardCommandStartsAndStopsWithContext(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			t.Fatalf("dashboard command did not become ready; exit after cancel = %v", err)
 		case <-time.After(3 * time.Second):
 		}
 		t.Fatal("dashboard command did not become ready")

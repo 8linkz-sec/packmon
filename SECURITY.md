@@ -1243,7 +1243,7 @@ run, and tools are unpacked or built into job-local directories.
 The maintained Dockerfile does not pin Alpine runtime packages: each runtime
 stage runs `apk upgrade --no-cache` and then installs its packages unversioned,
 so every image build takes the distribution's current security updates on top
-of the digest-pinned base image and never fails because Alpine retired an exact
+of the base image's line tag and never fails because Alpine retired an exact
 package version. `tests/ci` rejects a version-pinned runtime package and a
 missing upgrade step. A warm BuildKit cache reuses an earlier package-install
 layer, so a build meant to pick up new Alpine security updates must run without
@@ -1261,9 +1261,10 @@ Consumer CI pipelines that run the Packmon CLI must:
   namespace;
 - install or use known Packmon binaries;
 - verify checksums where downloads occur;
-- keep maintained Dockerfile and Compose image defaults digest-pinned; internal
-  registry mirror overrides for builder, runtime, and PostgreSQL images must
-  preserve `@sha256` pinning;
+- keep the maintained Dockerfile and Compose builder and runtime image defaults
+  on their line tags (no digest, no patch pin) and the PostgreSQL default
+  digest-pinned; an internal registry mirror override for the PostgreSQL image
+  must preserve its `@sha256` pin;
 - avoid embedding secrets in logs;
 - treat `PACKMON_SERVER` and API key values as CI secrets;
 - use `PACKMON_REQUIRE_REMOTE=true` for remote CI scans so server failures do

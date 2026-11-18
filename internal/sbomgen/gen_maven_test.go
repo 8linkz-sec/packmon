@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -36,9 +37,15 @@ func TestMavenGeneratorGenerateCopiesStagedBOM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
-	joined := strings.Join(got.Args, " ")
-	if got.Name != "mvn" || !strings.Contains(joined, "org.cyclonedx:cyclonedx-maven-plugin:"+mavenPluginVersion+":makeAggregateBom") || !strings.Contains(joined, "-DincludeTestScope=true") {
+	// The plugin release is spelled out: the pin is the latest release, and a
+	// bump is a deliberate edit here as for the npm and PyPI generator pins.
+	if got.Name != "mvn" || !slices.Contains(got.Args, "org.cyclonedx:cyclonedx-maven-plugin:2.9.3:makeAggregateBom") || !slices.Contains(got.Args, "-DincludeTestScope=true") {
 		t.Fatalf("RunOptions = %+v", got)
+	}
+	// Like the npm and PyPI generators, Maven gets the spec version explicitly
+	// so a plugin release that moves its default cannot change the format.
+	if !slices.Contains(got.Args, "-DschemaVersion="+cycloneDXSpecVersion) {
+		t.Fatalf("mvn args = %v, want -DschemaVersion=%s", got.Args, cycloneDXSpecVersion)
 	}
 	// #nosec G304 -- test reads the generated output path it passed to the generator.
 	if data, err := os.ReadFile(outPath); err != nil || !strings.Contains(string(data), "CycloneDX") {

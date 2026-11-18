@@ -31,7 +31,7 @@ func (pypiGenerator) InstallSpec() InstallSpec {
 }
 
 func (pypiGenerator) Generate(ctx context.Context, d Detection, outPath string, genOpts GenerateOptions, run RunnerFunc) error {
-	args := []string{d.InputKind, "--output-format", "JSON", "--output-file", outPath}
+	args := []string{d.InputKind, "--spec-version", cycloneDXSpecVersion, "--output-format", "JSON", "--output-file", outPath}
 	opts := RunOptions{Name: "cyclonedx-py", Args: args}
 	switch d.InputKind {
 	case "requirements":
