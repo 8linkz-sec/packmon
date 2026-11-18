@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 func repoFile(t *testing.T, rel string) string {

@@ -10,7 +10,7 @@ import (
 	"golang.org/x/mod/modfile"
 )
 
-const maintainedYAMLModule = "go.yaml.in/yaml/v3"
+const maintainedYAMLModule = "go.yaml.in/yaml/v4"
 
 func TestYAMLImportsUseMaintainedModulePath(t *testing.T) {
 	t.Parallel()

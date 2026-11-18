@@ -491,8 +491,9 @@ func (b *backgroundServices) finishDeferredQueueRestart(oldDone, forward chan er
 		return
 	}
 	// Nobody else consumed the exit: restarts only read forward while holding
-	// queueMu, and shutdown clears queueDone before it reads.
-	<-forward
+	// queueMu, and shutdown clears queueDone before it reads. Take the exit back
+	// off forward; it is the err published above.
+	err = <-forward
 	b.removeQueueDoneLocked(forward)
 	b.queueDone = nil
 	if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {

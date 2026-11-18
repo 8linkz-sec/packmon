@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 	"golang.org/x/mod/modfile"
 )
 
@@ -262,8 +262,8 @@ func TestWebAssetBuildDeclaresNode20AndUsesLockfileManagedTools(t *testing.T) {
 		t.Fatalf("parse package.json: %v", err)
 	}
 
-	if pkg.Engines["node"] != ">=24.11.0" {
-		t.Fatalf("package.json engines.node = %q, want Node >=24.11.0", pkg.Engines["node"])
+	if pkg.Engines["node"] != ">=24.15.0" {
+		t.Fatalf("package.json engines.node = %q, want Node >=24.15.0", pkg.Engines["node"])
 	}
 	if strings.Contains(pkg.Scripts["build:web:css"], "npx") {
 		t.Fatalf("build:web:css uses npx outside lockfile guardrails: %q", pkg.Scripts["build:web:css"])

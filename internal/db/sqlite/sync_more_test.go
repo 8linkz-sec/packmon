@@ -1517,8 +1517,7 @@ func TestSyncSerializesConcurrentCallsForSameDatabasePath(t *testing.T) {
 	select {
 	case <-secondRequestDone:
 		close(allowFirstResponse)
-		<-firstErr
-		<-secondErr
+		t.Logf("first sync: %v; second sync: %v", <-firstErr, <-secondErr)
 		t.Fatal("second sync reached server before first sync completed")
 	case <-time.After(100 * time.Millisecond):
 	}

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 func TestNonGoFormattingGateIsConfigured(t *testing.T) {
@@ -109,9 +109,9 @@ func TestWebAssetAndOpenAPILintScriptsArePinned(t *testing.T) {
 
 	for name, wantVersion := range map[string]string{
 		"@eslint/js":   "10.0.1",
-		"@redocly/cli": "2.72.1",
+		"@redocly/cli": "2.80.0",
 		"eslint":       "10.15.0",
-		"stylelint":    "17.16.0",
+		"stylelint":    "18.0.0",
 	} {
 		if got := pkg.DevDependencies[name]; got != wantVersion {
 			t.Fatalf("package.json devDependency %s = %q, want %q", name, got, wantVersion)
@@ -185,17 +185,53 @@ func TestWebAssetAndOpenAPILintScriptsArePinned(t *testing.T) {
 	}
 }
 
+// The GitLab golangci-lint job image follows its line tag without a digest
+// (operator rule 2026-11-18) and stays on the Makefile pin's line, while the
+// test-tool install uses the exact Makefile pin.
+func TestGitLabGolangCILintImageFollowsMakefilePinLine(t *testing.T) {
+	t.Parallel()
+
+	makePin := ""
+	for _, line := range strings.Split(readRepoFile(t, "Makefile"), "\n") {
+		if value, ok := strings.CutPrefix(line, "GOLANGCI_LINT_VERSION ?= "); ok {
+			makePin = strings.TrimSpace(value)
+		}
+	}
+	parts := strings.Split(makePin, ".")
+	if len(parts) != 3 {
+		t.Fatalf("Makefile GOLANGCI_LINT_VERSION = %q, want vMAJOR.MINOR.PATCH", makePin)
+	}
+
+	var pipeline struct {
+		Tools struct {
+			Variables map[string]string `yaml:"variables"`
+		} `yaml:".packmon-test-tools"`
+		Lint struct {
+			Image string `yaml:"image"`
+		} `yaml:"golangci-lint"`
+	}
+	if err := yaml.Unmarshal([]byte(readRepoFile(t, ".gitlab-ci.yml")), &pipeline); err != nil {
+		t.Fatalf("parse .gitlab-ci.yml: %v", err)
+	}
+	if want := "golangci/golangci-lint:" + parts[0] + "." + parts[1]; pipeline.Lint.Image != want {
+		t.Fatalf(".gitlab-ci.yml golangci-lint image = %q, want line tag %q without digest", pipeline.Lint.Image, want)
+	}
+	if got := pipeline.Tools.Variables["GOLANGCI_LINT_VERSION"]; got != makePin {
+		t.Fatalf(".gitlab-ci.yml GOLANGCI_LINT_VERSION = %q, want Makefile pin %q", got, makePin)
+	}
+}
+
 func TestMakefileLintTargetsEnforcePinnedTooling(t *testing.T) {
 	t.Parallel()
 
 	makefile := readRepoFile(t, "Makefile")
 	for _, want := range []string{
-		"GOFUMPT_VERSION ?= v0.9.2",
-		"GOLANGCI_LINT_VERSION ?= v2.14.0",
-		"SHELLCHECK_IMAGE ?= koalaman/shellcheck-alpine:v0.10.0",
-		"HADOLINT_IMAGE ?= hadolint/hadolint:v2.12.0-alpine",
-		"ACTIONLINT_VERSION ?= v1.7.7",
-		"PSSCRIPTANALYZER_VERSION ?= 1.24.0",
+		"GOFUMPT_VERSION ?= v0.12.0",
+		"GOLANGCI_LINT_VERSION ?= v2.15.0",
+		"SHELLCHECK_IMAGE ?= koalaman/shellcheck-alpine:v0.11.0",
+		"HADOLINT_IMAGE ?= hadolint/hadolint:v2.15.1-alpine",
+		"ACTIONLINT_VERSION ?= v1.7.12",
+		"PSSCRIPTANALYZER_VERSION ?= 1.25.0",
 		"lint: check-go-lint-tools lint-nongo lint-web lint-openapi lint-shell lint-docker lint-actions lint-powershell",
 		"fmt: check-gofumpt-tool",
 		"check-go-lint-tools: check-gofumpt-tool check-golangci-lint-tool",

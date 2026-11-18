@@ -41,9 +41,9 @@ variables:
 # contend for its lock).
 .packmon-test-tools:
   variables:
-    NODE_VERSION: "26.13.0"
-    NODE_SHA256: 5848553868b402d3fabb5b09270649977780a390f832155721025a08b5104455
-    GOLANGCI_LINT_VERSION: v2.14.0
+    NODE_VERSION: "26.13.1"
+    NODE_SHA256: 518674de2b621728a5e4486f5fb3b7d2900bb3cc4aa97969edaa463db99f9778
+    GOLANGCI_LINT_VERSION: v2.15.0
     PACKMON_BROWSER_BIN: /usr/bin/chromium
     DEBIAN_FRONTEND: noninteractive
   before_script:
@@ -81,6 +81,7 @@ go-test-race:
   script:
     - go test $(go list ./... | grep -v /node_modules/) -race -count=1 -timeout=10m
 
-# Same linter version as the Makefile pin (GOLANGCI_LINT_VERSION), so local and CI runs agree.
+# Same linter line as the Makefile pin (GOLANGCI_LINT_VERSION), so local and CI runs agree; the image
+# follows its line tag (no digest) so every pipeline pulls the line's current patch release.
 golangci-lint:
-  image: golangci/golangci-lint:v2.14.0@sha256:ad862ba6b3798cbe0fd9fd7408d498fd74fbd2623a92406b2fd3898faf0bf98f
+  image: golangci/golangci-lint:v2.15

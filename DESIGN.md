@@ -247,10 +247,16 @@ Packmon's maintained deployment surfaces are intentionally narrow:
   `CONTRIBUTING.md`. Release binaries are built locally from source; the container
   images ship `SECURITY.md` and `LICENSE` (Apache-2.0) but no third-party
   notice files.
-- The maintained Dockerfile and Compose model keep digest-pinned default images
-  but expose `PACKMON_GO_BUILDER_IMAGE`, `PACKMON_ALPINE_RUNTIME_IMAGE`, and
-  `PACKMON_POSTGRES_IMAGE` so operators can substitute internal registry
-  mirrors without changing the supported deployment path.
+- The maintained Dockerfile and Compose model default the Go builder and Alpine
+  runtime images to their line tags without a digest (`golang:1.27-alpine`,
+  `alpine:3.24`), so every fresh or `--pull` build takes the line's current
+  image and its security fixes; a new Go or Alpine line is a deliberate bump.
+  The Chainguard PostgreSQL default stays digest-pinned because the public
+  registry publishes no `18` line tag and `latest` would move PostgreSQL majors
+  under an existing data volume. `PACKMON_GO_BUILDER_IMAGE`,
+  `PACKMON_ALPINE_RUNTIME_IMAGE`, and `PACKMON_POSTGRES_IMAGE` let operators
+  substitute internal registry mirrors without changing the supported
+  deployment path.
 
 The server process still supports containerized and orchestrated operation, but
 the repository no longer maintains first-party Kubernetes deployment packaging.

@@ -608,10 +608,12 @@ logging controls, and the query-ID-first diagnostic workflow.
 Compose forwards `PACKMON_VERSION`, `PACKMON_COMMIT`, and `PACKMON_BUILD_DATE`
 as Docker build args so `packmon-server version`, startup logs, and `/version`
 report the image source. They default to `dev`, `none`, and `unknown` for local
-builds. Compose also supports digest-pinned internal image mirrors through
+builds. Compose also supports internal image mirrors through
 `PACKMON_POSTGRES_IMAGE`, `PACKMON_GO_BUILDER_IMAGE`, and
-`PACKMON_ALPINE_RUNTIME_IMAGE`. Overrides should point at mirrored images with
-the same pinned `@sha256` digest policy as the repository defaults.
+`PACKMON_ALPINE_RUNTIME_IMAGE`. The builder and runtime defaults are line tags
+(`golang:1.27-alpine`, `alpine:3.24`) without a digest; the PostgreSQL default
+keeps its `@sha256` digest, and a PostgreSQL mirror override should keep one
+too.
 
 For local-only use, `.env.example` enables
 `PACKMON_ALLOW_INSECURE_LOCAL_HTTP=true` with explicit container bind mode
@@ -642,7 +644,7 @@ delete the database.
 
 The UI ships local Tailwind and htmx assets from the repository, so runtime and
 normal container builds do not depend on external CDNs. When you change web
-templates or Tailwind classes, use Node.js 24.11.0 or newer and refresh the
+templates or Tailwind classes, use Node.js 24.15.0 or newer and refresh the
 generated Tailwind v4 and htmx assets with
 `npm ci --ignore-scripts && npm run build:web` before building the image.
 

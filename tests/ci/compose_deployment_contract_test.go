@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
 )
 
 // composeServiceContract is the parsed subset of a Compose service that the

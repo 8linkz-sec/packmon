@@ -23,17 +23,17 @@ func TestDeveloperRequirementsAreDocumentedAndScripted(t *testing.T) {
 	for _, want := range []string{
 		"packmon|packmon|full|true|any|manual|",
 		"go|go|agent,sbom,dev|true|" + patchedGoVersion + "|manual|",
-		"node|node|web,sbom,dev|true|>=24.11.0|manual|",
+		"node|node|web,sbom,dev|true|>=24.15.0|manual|",
 		"npm|npm|web,sbom,dev|true|>=10|manual|",
 		"python|python|sbom,dev|true|>=3.12.0|manual|",
 		"docker|docker|server,dev|true|any|manual|",
-		"cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.10.0|go-install:github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0|",
+		"cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.12.0|go-install:github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0|",
 		"cyclonedx-npm|cyclonedx-npm|sbom,dev|true|5.0.0|npm-global:@cyclonedx/cyclonedx-npm@5.0.0|",
 		"cyclonedx-py|cyclonedx-py|sbom,dev|true|7.3.0|pip-user:cyclonedx-bom==7.3.0|",
-		"go-licenses|go-licenses|dev|true|v1.6.0|go-install:github.com/google/go-licenses@v1.6.0|",
-		"gofumpt|gofumpt|dev|true|v0.9.2|go-install:mvdan.cc/gofumpt@v0.9.2|",
-		"govulncheck|govulncheck|dev|true|v1.5.0|go-install:golang.org/x/vuln/cmd/govulncheck@v1.5.0|",
-		"gosec|gosec|dev|true|v2.27.1|go-install:github.com/securego/gosec/v2/cmd/gosec@v2.27.1|",
+		"go-licenses|go-licenses|dev|true|v2.0.1|go-install:github.com/google/go-licenses/v2@v2.0.1|",
+		"gofumpt|gofumpt|dev|true|v0.12.0|go-install:mvdan.cc/gofumpt@v0.12.0|",
+		"govulncheck|govulncheck|dev|true|v1.10.0|go-install:golang.org/x/vuln/cmd/govulncheck@v1.10.0|",
+		"gosec|gosec|dev|true|v2.30.0|go-install:github.com/securego/gosec/v2/cmd/gosec@v2.30.0|",
 	} {
 		if !strings.Contains(requirements, want) {
 			t.Fatalf("requirements/packmon-tools.tsv missing %q", want)
@@ -214,7 +214,7 @@ func TestGoAutoSBOMRequirementsUseGoToolchainOnly(t *testing.T) {
 		strings.Contains(string(requirementsData), "cyclonedx-gomod|cyclonedx-gomod|sbom,dev|") {
 		t.Fatal("Go auto-SBOM profile must not require cyclonedx-gomod")
 	}
-	if !strings.Contains(string(requirementsData), "cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.10.0|go-install:") {
+	if !strings.Contains(string(requirementsData), "cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.12.0|go-install:") {
 		t.Fatal("cyclonedx-gomod release tooling pin must remain available in the dev profile")
 	}
 
@@ -341,11 +341,11 @@ func TestManagedRequirementPinsAreCheckedBeforeAcceptingInstalledTools(t *testin
 		t.Fatalf("read requirements file: %v", err)
 	}
 	for _, want := range []string{
-		"cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.10.0|go-install:",
+		"cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.12.0|go-install:",
 		"cyclonedx-npm|cyclonedx-npm|sbom,dev|true|5.0.0|npm-global:",
 		"cyclonedx-py|cyclonedx-py|sbom,dev|true|7.3.0|pip-user:",
-		"go-licenses|go-licenses|dev|true|v1.6.0|go-install:",
-		"gosec|gosec|dev|true|v2.27.1|go-install:",
+		"go-licenses|go-licenses|dev|true|v2.0.1|go-install:",
+		"gosec|gosec|dev|true|v2.30.0|go-install:",
 	} {
 		if !strings.Contains(string(requirementsData), want) {
 			t.Fatalf("requirements/packmon-tools.tsv missing managed pin marker %q", want)

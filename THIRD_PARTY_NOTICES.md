@@ -13,7 +13,7 @@ a full Go module license report on demand.
 
 Packages: `tailwindcss`, `@tailwindcss/cli`
 
-Version: 4.3.3
+Version: 4.3.5
 
 License: MIT
 

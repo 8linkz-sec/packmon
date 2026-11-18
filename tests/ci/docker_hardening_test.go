@@ -9,7 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"go.yaml.in/yaml/v3"
+	"go.yaml.in/yaml/v4"
+	"golang.org/x/mod/modfile"
 )
 
 func TestDockerHardeningTestsStayOutOfReleaseCatchAll(t *testing.T) {
@@ -67,8 +68,8 @@ func TestDockerBuildsStampBinaryMetadata(t *testing.T) {
 		"VERSION: ${PACKMON_VERSION:-dev}",
 		"COMMIT: ${PACKMON_COMMIT:-none}",
 		"DATE: ${PACKMON_BUILD_DATE:-unknown}",
-		"PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb}",
-		"PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a}",
+		"PACKMON_GO_BUILDER_IMAGE: ${PACKMON_GO_BUILDER_IMAGE:-" + goBuilderLineImage + "}",
+		"PACKMON_ALPINE_RUNTIME_IMAGE: ${PACKMON_ALPINE_RUNTIME_IMAGE:-" + alpineRuntimeLineImage + "}",
 	} {
 		if !strings.Contains(composeText, want) {
 			t.Fatalf("docker-compose.yml missing build arg %q", want)
@@ -86,7 +87,7 @@ func TestDockerRuntimeStagesUseCurrentAlpine(t *testing.T) {
 	}
 	dockerText := string(dockerData)
 	for _, want := range []string{
-		"ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a",
+		"ARG PACKMON_ALPINE_RUNTIME_IMAGE=" + alpineRuntimeLineImage + "\n",
 		"FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS server",
 		"FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS cli",
 	} {
@@ -239,33 +240,123 @@ func dockerfileRuntimeStages(t *testing.T, dockerfile string) map[string]string 
 	return stages
 }
 
-func TestDockerfilePinsAllExternalBaseImagesByDigest(t *testing.T) {
+// Base images follow their line tags (operator rule 2026-11-18): no digest and
+// no patch pin, so every rebuild pulls the line's current image and its
+// security fixes. Moving to a new Go or Alpine line updates these constants
+// together with the Dockerfile, both Compose files, .env.example and the
+// integration health-fixture builder.
+const (
+	goBuilderLineImage     = "golang:1.27-alpine"
+	alpineRuntimeLineImage = "alpine:3.24"
+)
+
+// The Chainguard PostgreSQL image stays digest-pinned. Blocker: the public
+// cgr.dev/chainguard/postgres repository publishes only `latest` and
+// `latest-dev` (no `18` line tag; the registry answers 404 for it), and
+// `latest` would silently move to the next PostgreSQL major, which an existing
+// PGDATA volume cannot start on without pg_upgrade. Database images move only
+// by a deliberate digest bump; this digest is PostgreSQL 18.7.
+const hardenedPostgresImage = "cgr.dev/chainguard/postgres:18@sha256:f4b066118f70efeb519d2aac94507f898698f4a145ecb43dd8fd4076f21b1124"
+
+var (
+	goBuilderLineTagRE     = regexp.MustCompile(`^golang:(\d+\.\d+)-alpine$`)
+	alpineRuntimeLineTagRE = regexp.MustCompile(`^alpine:\d+\.\d+$`)
+)
+
+func TestDockerfileBaseImagesUseLineTagsWithoutDigest(t *testing.T) {
 	t.Parallel()
 
-	dockerfile := filepath.Join("..", "..", "Dockerfile")
-	dockerData, err := os.ReadFile(dockerfile) //nolint:gosec // static repository fixture path
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
+	dockerText := repoFile(t, "Dockerfile")
+	fromRE := regexp.MustCompile(`(?m)^FROM\s+([^\s]+)`)
+	for _, match := range fromRE.FindAllStringSubmatch(dockerText, -1) {
+		if imageRef := match[1]; imageRef != "scratch" && !strings.HasPrefix(imageRef, "$") {
+			t.Fatalf("Dockerfile FROM %q must use a PACKMON_*_IMAGE build arg", imageRef)
+		}
 	}
 
-	fromRE := regexp.MustCompile(`(?m)^FROM\s+([^\s]+)`)
-	for _, match := range fromRE.FindAllStringSubmatch(string(dockerData), -1) {
-		imageRef := match[1]
-		if imageRef == "scratch" || strings.HasPrefix(imageRef, "$") {
-			continue
-		}
-		if !strings.Contains(imageRef, "@sha256:") {
-			t.Fatalf("Dockerfile base image %q is not pinned by digest", imageRef)
-		}
+	builder := dockerfileArgDefault(t, dockerText, "PACKMON_GO_BUILDER_IMAGE")
+	runtime := dockerfileArgDefault(t, dockerText, "PACKMON_ALPINE_RUNTIME_IMAGE")
+	if err := checkBaseImageLineTags(builder, runtime, moduleGoLanguageLine(t)); err != nil {
+		t.Fatal(err)
 	}
-	for _, want := range []string{
-		"ARG PACKMON_GO_BUILDER_IMAGE=golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb",
-		"ARG PACKMON_ALPINE_RUNTIME_IMAGE=alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a",
+	if builder != goBuilderLineImage || runtime != alpineRuntimeLineImage {
+		t.Fatalf("Dockerfile base images = %q, %q; want %q, %q", builder, runtime, goBuilderLineImage, alpineRuntimeLineImage)
+	}
+
+	fixture := repoFile(t, "tests/integration/docker_runtime_artifacts_test.go")
+	if want := `dockerHealthFixtureBuilderImage = "` + builder + `"`; !strings.Contains(fixture, want) {
+		t.Fatalf("integration health fixture must build with the Dockerfile builder image; missing %q", want)
+	}
+}
+
+func TestBaseImageLineTagPolicyRejectsDigestsAndPatchPins(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name     string
+		builder  string
+		runtime  string
+		goLine   string
+		accepted bool
+	}{
+		{name: "line tags", builder: "golang:1.27-alpine", runtime: "alpine:3.24", goLine: "1.27", accepted: true},
+		{name: "builder digest", builder: "golang:1.27-alpine@sha256:" + strings.Repeat("a", 64), runtime: "alpine:3.24", goLine: "1.27"},
+		{name: "builder patch", builder: "golang:1.27.4-alpine", runtime: "alpine:3.24", goLine: "1.27"},
+		{name: "builder pinned alpine", builder: "golang:1.27-alpine3.24", runtime: "alpine:3.24", goLine: "1.27"},
+		{name: "builder behind go.mod line", builder: "golang:1.26-alpine", runtime: "alpine:3.24", goLine: "1.27"},
+		{name: "runtime digest", builder: "golang:1.27-alpine", runtime: "alpine:3.24@sha256:" + strings.Repeat("b", 64), goLine: "1.27"},
+		{name: "runtime patch", builder: "golang:1.27-alpine", runtime: "alpine:3.24.4", goLine: "1.27"},
+		{name: "runtime floating latest", builder: "golang:1.27-alpine", runtime: "alpine:latest", goLine: "1.27"},
 	} {
-		if !strings.Contains(string(dockerData), want) {
-			t.Fatalf("Dockerfile missing digest-pinned mirror build arg default %q", want)
-		}
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkBaseImageLineTags(test.builder, test.runtime, test.goLine)
+			if (err == nil) != test.accepted {
+				t.Fatalf("checkBaseImageLineTags(%q, %q, %q) error = %v, accepted want %t", test.builder, test.runtime, test.goLine, err, test.accepted)
+			}
+		})
 	}
+}
+
+func checkBaseImageLineTags(builder, runtime, goLine string) error {
+	match := goBuilderLineTagRE.FindStringSubmatch(builder)
+	if match == nil {
+		return fmt.Errorf("go builder image %q must be a golang:<major.minor>-alpine line tag without digest or patch pin", builder)
+	}
+	if match[1] != goLine {
+		return fmt.Errorf("go builder image %q must follow the go.mod language line %s", builder, goLine)
+	}
+	if !alpineRuntimeLineTagRE.MatchString(runtime) {
+		return fmt.Errorf("alpine runtime image %q must be an alpine:<major.minor> line tag without digest or patch pin", runtime)
+	}
+	return nil
+}
+
+func dockerfileArgDefault(t *testing.T, dockerText, key string) string {
+	t.Helper()
+
+	match := regexp.MustCompile(`(?m)^ARG ` + regexp.QuoteMeta(key) + `=(\S+)$`).FindStringSubmatch(dockerText)
+	if match == nil {
+		t.Fatalf("Dockerfile has no ARG %s default", key)
+	}
+	return match[1]
+}
+
+func moduleGoLanguageLine(t *testing.T) string {
+	t.Helper()
+
+	modFile, err := modfile.Parse("go.mod", []byte(repoFile(t, "go.mod")), nil)
+	if err != nil {
+		t.Fatalf("parse go.mod: %v", err)
+	}
+	if modFile.Go == nil {
+		t.Fatal("go.mod must declare a go language version")
+	}
+	parts := strings.SplitN(modFile.Go.Version, ".", 3)
+	if len(parts) < 2 {
+		t.Fatalf("go.mod language version %q has no minor line", modFile.Go.Version)
+	}
+	return parts[0] + "." + parts[1]
 }
 
 func TestDockerHealthcheckFollowsInAppTLSConfiguration(t *testing.T) {
@@ -647,7 +738,6 @@ func TestDockerfileDoesNotMaskGoModuleDownloadFailures(t *testing.T) {
 func TestDeploymentAndIntegrationContainerImagesAreDigestPinned(t *testing.T) {
 	t.Parallel()
 
-	const hardenedPostgresImage = "cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461"
 	const composePostgresMirrorDefault = "image: ${PACKMON_POSTGRES_IMAGE:-" + hardenedPostgresImage + "}"
 
 	for _, tc := range []struct {
@@ -707,6 +797,14 @@ func TestDeploymentAndIntegrationContainerImagesAreDigestPinned(t *testing.T) {
 				`"cgr.dev/chainguard/postgres:latest@sha256:`,
 			},
 		},
+		{
+			rel:  filepath.Join("internal", "server", "postgres_routes_integration_test.go"),
+			want: `postgresRoutesIntegrationImage = "` + hardenedPostgresImage + `"`,
+		},
+		{
+			rel:  filepath.Join("tests", "integration", "compose_runtime_contract_test.go"),
+			want: `composeRuntimePostgresImage = "` + hardenedPostgresImage + `"`,
+		},
 	} {
 		path := filepath.Join("..", "..", tc.rel)
 		data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
@@ -728,7 +826,6 @@ func TestDeploymentAndIntegrationContainerImagesAreDigestPinned(t *testing.T) {
 func TestDockerComposeAllowsDigestPinnedPostgresImageMirrorOverride(t *testing.T) {
 	t.Parallel()
 
-	const hardenedPostgresImage = "cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461"
 	const wantImage = "${PACKMON_POSTGRES_IMAGE:-" + hardenedPostgresImage + "}"
 
 	path := filepath.Join("..", "..", "docker-compose.yml")

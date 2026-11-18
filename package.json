@@ -11,20 +11,16 @@
     "lint:web": "npm run lint:js && npm run lint:css"
   },
   "engines": {
-    "node": ">=24.11.0",
+    "node": ">=24.15.0",
     "npm": ">=10"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@redocly/cli": "2.72.1",
-    "@tailwindcss/cli": "4.3.3",
+    "@redocly/cli": "2.80.0",
+    "@tailwindcss/cli": "4.3.5",
     "eslint": "10.15.0",
     "htmx.org": "2.0.11",
-    "stylelint": "17.16.0",
-    "tailwindcss": "4.3.3"
-  },
-  "overrides": {
-    "@parcel/watcher": "2.6.0",
-    "enhanced-resolve": "5.26.0"
+    "stylelint": "18.0.0",
+    "tailwindcss": "4.3.5"
   }
 }

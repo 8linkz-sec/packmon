@@ -80,7 +80,7 @@ func TestParseComposeImagesResolvesVariableDefaults(t *testing.T) {
 	input := `
 services:
   postgres:
-    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:891139a6d9036632791857fb7585425f1bf0c64516fc52bc39da94305ee92461}
+    image: ${PACKMON_POSTGRES_IMAGE:-cgr.dev/chainguard/postgres:18@sha256:f4b066118f70efeb519d2aac94507f898698f4a145ecb43dd8fd4076f21b1124}
   missing:
     image: ${UNSET_IMAGE}
   fallback:
