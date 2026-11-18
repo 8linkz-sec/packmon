@@ -7,8 +7,8 @@ python|python|sbom,dev|true|>=3.12.0|manual|Install Python 3.12.0 or newer from 
 mvn|mvn|sbom,dev|true|>=3.9.9|manual|Install JDK 17 or newer and Apache Maven 3.9.9 or newer from https://maven.apache.org/install.html|Generate Maven Java SBOMs
 docker|docker|server,dev|true|any|manual|Install Docker Desktop or Docker Engine with Compose v2|Run the local Docker stack and container-backed tests
 cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.12.0|go-install:github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0|Run scripts/bootstrap after Go is installed|Generate release Go CycloneDX SBOMs
-cyclonedx-npm|cyclonedx-npm|sbom,dev|true|5.0.0|npm-global:@cyclonedx/cyclonedx-npm@5.0.0|Run scripts/bootstrap after npm is installed|Generate npm CycloneDX SBOMs
-cyclonedx-py|cyclonedx-py|sbom,dev|true|7.3.0|pip-user:cyclonedx-bom==7.3.0|Run scripts/bootstrap after Python is installed|Generate Python CycloneDX SBOMs
+cyclonedx-npm|cyclonedx-npm|sbom,dev|true|7.0.1|npm-global:@cyclonedx/cyclonedx-npm@7.0.1|Run scripts/bootstrap after npm is installed|Generate npm CycloneDX SBOMs
+cyclonedx-py|cyclonedx-py|sbom,dev|true|8.0.1|pip-user:cyclonedx-bom==8.0.1|Run scripts/bootstrap after Python is installed|Generate Python CycloneDX SBOMs
 go-licenses|go-licenses|dev|true|v2.0.1|go-install:github.com/google/go-licenses/v2@v2.0.1|Run scripts/bootstrap after Go is installed|Generate release Go license notices
 gofumpt|gofumpt|dev|true|v0.12.0|go-install:mvdan.cc/gofumpt@v0.12.0|Run scripts/bootstrap after Go is installed|Check and format Go source
 golangci-lint|golangci-lint|dev|true|v2.15.0|go-install:github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0|Run scripts/bootstrap after Go is installed|Run the repository lint gate

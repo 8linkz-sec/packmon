@@ -527,8 +527,11 @@ Important behavior:
   generated files as timestamped snapshots so repeated runs do not overwrite
   previous SBOMs; `--install-tools` may install missing pinned generator tools
   where automatic installation is supported. Pinned generator versions are
-  `cyclonedx-npm` 5.0.0, `cyclonedx-bom` 7.3.0, and
-  `cyclonedx-maven-plugin` 2.9.1. Existing PATH tools for npm and PyPI are
+  `cyclonedx-npm` 7.0.1, `cyclonedx-bom` 8.0.1, and
+  `cyclonedx-maven-plugin` 2.9.1. The npm and PyPI generators are passed
+  `--spec-version 1.6` and the Go generator writes 1.6, so every generated SBOM
+  uses CycloneDX 1.6 regardless of a generator's own default
+  (`cyclonedx-npm` 7 defaults to 1.7). Existing PATH tools for npm and PyPI are
   version-checked before use. Manifest reads, generator output capture, and
   generated-SBOM validation are size-bounded, and cleanup failures are returned
   as operational errors instead of being silently ignored. The Go generator

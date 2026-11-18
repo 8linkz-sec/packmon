@@ -30,7 +30,7 @@ func (npmGenerator) InstallSpec() InstallSpec {
 }
 
 func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, opts GenerateOptions, run RunnerFunc) error {
-	args := []string{"--output-format", "JSON", "--output-file", outPath}
+	args := []string{"--spec-version", cycloneDXSpecVersion, "--output-format", "JSON", "--output-file", outPath}
 	hasLockfile, err := npmHasLockfileScoped(d.ScanRoot, d.ProjectDir)
 	if err != nil {
 		return err

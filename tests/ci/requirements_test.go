@@ -28,8 +28,8 @@ func TestDeveloperRequirementsAreDocumentedAndScripted(t *testing.T) {
 		"python|python|sbom,dev|true|>=3.12.0|manual|",
 		"docker|docker|server,dev|true|any|manual|",
 		"cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.12.0|go-install:github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0|",
-		"cyclonedx-npm|cyclonedx-npm|sbom,dev|true|5.0.0|npm-global:@cyclonedx/cyclonedx-npm@5.0.0|",
-		"cyclonedx-py|cyclonedx-py|sbom,dev|true|7.3.0|pip-user:cyclonedx-bom==7.3.0|",
+		"cyclonedx-npm|cyclonedx-npm|sbom,dev|true|7.0.1|npm-global:@cyclonedx/cyclonedx-npm@7.0.1|",
+		"cyclonedx-py|cyclonedx-py|sbom,dev|true|8.0.1|pip-user:cyclonedx-bom==8.0.1|",
 		"go-licenses|go-licenses|dev|true|v2.0.1|go-install:github.com/google/go-licenses/v2@v2.0.1|",
 		"gofumpt|gofumpt|dev|true|v0.12.0|go-install:mvdan.cc/gofumpt@v0.12.0|",
 		"govulncheck|govulncheck|dev|true|v1.10.0|go-install:golang.org/x/vuln/cmd/govulncheck@v1.10.0|",
@@ -342,8 +342,8 @@ func TestManagedRequirementPinsAreCheckedBeforeAcceptingInstalledTools(t *testin
 	}
 	for _, want := range []string{
 		"cyclonedx-gomod|cyclonedx-gomod|dev|true|v1.12.0|go-install:",
-		"cyclonedx-npm|cyclonedx-npm|sbom,dev|true|5.0.0|npm-global:",
-		"cyclonedx-py|cyclonedx-py|sbom,dev|true|7.3.0|pip-user:",
+		"cyclonedx-npm|cyclonedx-npm|sbom,dev|true|7.0.1|npm-global:",
+		"cyclonedx-py|cyclonedx-py|sbom,dev|true|8.0.1|pip-user:",
 		"go-licenses|go-licenses|dev|true|v2.0.1|go-install:",
 		"gosec|gosec|dev|true|v2.30.0|go-install:",
 	} {

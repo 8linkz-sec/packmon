@@ -179,8 +179,8 @@ is already available:
 | Tool | Install source |
 |---|---|
 | `cyclonedx-gomod` | `go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0` |
-| `cyclonedx-npm` | `npm install --global --ignore-scripts @cyclonedx/cyclonedx-npm@5.0.0` |
-| `cyclonedx-py` | `python -m pip install --user cyclonedx-bom==7.3.0` |
+| `cyclonedx-npm` | `npm install --global --ignore-scripts @cyclonedx/cyclonedx-npm@7.0.1` |
+| `cyclonedx-py` | `python -m pip install --user cyclonedx-bom==8.0.1` |
 | `go-licenses` | `go install github.com/google/go-licenses/v2@v2.0.1` |
 | `gofumpt` | `go install mvdan.cc/gofumpt@v0.12.0` |
 | `golangci-lint` | `go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0` |

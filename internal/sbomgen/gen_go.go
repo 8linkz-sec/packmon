@@ -147,7 +147,7 @@ func buildGoListCycloneDX(modules []goListModule) (goCycloneDXBOM, error) {
 	rootRef := "pkg:golang/" + purlPath(root)
 	bom := goCycloneDXBOM{
 		BOMFormat:   "CycloneDX",
-		SpecVersion: "1.6",
+		SpecVersion: cycloneDXSpecVersion,
 		Version:     1,
 		Metadata: goCycloneDXMetadata{
 			Timestamp: time.Now().UTC().Format(time.RFC3339),
