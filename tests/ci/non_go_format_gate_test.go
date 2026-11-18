@@ -92,7 +92,7 @@ func newNonGoFormatGateFixture(t *testing.T, git string, script []byte, file, co
 	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o750); err != nil {
 		t.Fatalf("create fixture scripts dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "scripts", "check-non-go-format.sh"), script, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "check-non-go-format.sh"), script, 0o600); err != nil { // #nosec G703 -- test-owned temporary fixture path.
 		t.Fatalf("write fixture gate script: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0o600); err != nil { // #nosec G306 -- test-owned temporary fixture.

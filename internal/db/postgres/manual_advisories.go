@@ -426,8 +426,7 @@ func manualAdvisoryLockKey(id string) int64 {
 	sum := sha256.Sum256([]byte("packmon:manual_advisory:" + strings.TrimSpace(id)))
 	// The wrap-around is intended: PostgreSQL advisory locks take a signed 64-bit
 	// key and only its uniqueness matters, not its numeric value.
-	//nolint:gosec // G115: deliberate reinterpretation of hash bits as a lock key.
-	return int64(binary.BigEndian.Uint64(sum[:8]))
+	return int64(binary.BigEndian.Uint64(sum[:8])) // #nosec G115 -- deliberate reinterpretation of hash bits as a lock key.
 }
 
 func checkManualAdvisoryRevisionTx(ctx context.Context, tx pgx.Tx, advisory *db.ManualAdvisory) error {
