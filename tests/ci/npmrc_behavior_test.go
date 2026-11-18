@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/mod/semver"
 )
 
 func TestTailwindWASMBundledDependenciesAreLocked(t *testing.T) {
@@ -38,6 +40,44 @@ func TestTailwindWASMBundledDependenciesAreLocked(t *testing.T) {
 		if !entry.InBundle {
 			t.Errorf("package-lock.json entry %q does not set inBundle", path)
 		}
+	}
+}
+
+// TestLockedMinimatchIsPatchedForGHSAg3hv75wgm249 keeps every locked minimatch
+// copy at or above 11.0.1, the first release fixing GHSA-g3hv-75wg-m249
+// (affected: >= 7.0.0, < 11.0.1). The CI npm-audit job runs with --omit=dev
+// and --audit-level=high, so it would not report this moderate advisory in the
+// dev-only web toolchain.
+func TestLockedMinimatchIsPatchedForGHSAg3hv75wgm249(t *testing.T) {
+	t.Parallel()
+
+	var lockfile struct {
+		Packages map[string]struct {
+			Version string `json:"version"`
+		} `json:"packages"`
+	}
+	if err := json.Unmarshal([]byte(readRepoFile(t, "package-lock.json")), &lockfile); err != nil {
+		t.Fatalf("parse package-lock.json: %v", err)
+	}
+
+	const firstPatched = "v11.0.1"
+	found := 0
+	for path, entry := range lockfile.Packages {
+		if path != "node_modules/minimatch" && !strings.HasSuffix(path, "/node_modules/minimatch") {
+			continue
+		}
+		found++
+		version := "v" + entry.Version
+		if !semver.IsValid(version) {
+			t.Errorf("package-lock.json %s has unparseable version %q", path, entry.Version)
+			continue
+		}
+		if semver.Compare(version, firstPatched) < 0 {
+			t.Errorf("package-lock.json %s = %s, want >= %s (GHSA-g3hv-75wg-m249)", path, entry.Version, strings.TrimPrefix(firstPatched, "v"))
+		}
+	}
+	if found == 0 {
+		t.Fatal("package-lock.json locks no minimatch package; the guard would pass vacuously")
 	}
 }
 
