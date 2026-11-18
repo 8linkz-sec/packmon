@@ -83,13 +83,13 @@ func TestDockerRuntimeArtifacts(t *testing.T) {
 	assertDockerUser(t, cliImage)
 
 	assertDockerAPKPackages(t, serverImage, []string{
-		"ca-certificates=20261020-r0",
-		"git=2.54.0-r0",
-		"tzdata=2026f-r0",
+		"ca-certificates",
+		"git",
+		"tzdata",
 	})
 	assertDockerAPKPackages(t, cliImage, []string{
-		"ca-certificates=20261020-r0",
-		"tzdata=2026f-r0",
+		"ca-certificates",
+		"tzdata",
 	})
 	assertDockerAPKPackageAbsent(t, cliImage, "git")
 
@@ -211,7 +211,7 @@ func assertDockerAPKPackages(t *testing.T, image string, packages []string) {
 	t.Helper()
 
 	for _, apkPackage := range packages {
-		runDockerCommand(t, dockerCommandTimeout, "verify exact APK package version in "+image, "run", "--rm", "--entrypoint", "apk", image, "info", "--exists", apkPackage)
+		runDockerCommand(t, dockerCommandTimeout, "verify APK package in "+image, "run", "--rm", "--entrypoint", "apk", image, "info", "--exists", apkPackage)
 	}
 }
 

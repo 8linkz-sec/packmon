@@ -99,7 +99,7 @@ func TestDockerRuntimeStagesUseCurrentAlpine(t *testing.T) {
 	}
 }
 
-func TestDockerfilePinsAlpineRuntimePackageInstalls(t *testing.T) {
+func TestDockerfileRuntimeStagesUpgradeThenInstallUnpinnedAlpinePackages(t *testing.T) {
 	t.Parallel()
 
 	dockerfile := filepath.Join("..", "..", "Dockerfile")
@@ -108,33 +108,11 @@ func TestDockerfilePinsAlpineRuntimePackageInstalls(t *testing.T) {
 		t.Fatalf("read Dockerfile: %v", err)
 	}
 	stages := dockerfileRuntimeStages(t, string(dockerData))
-	for stageName, packagePins := range map[string][]string{
-		"server": {
-			"ca-certificates=20261020-r0",
-			"git=2.54.0-r0",
-			"tzdata=2026f-r0",
-		},
-		"cli": {
-			"ca-certificates=20261020-r0",
-			"tzdata=2026f-r0",
-		},
+	for stageName, packageNames := range map[string][]string{
+		"server": {"ca-certificates", "git", "tzdata"},
+		"cli":    {"ca-certificates", "tzdata"},
 	} {
-		stage := stages[stageName]
-		packageNames := make([]string, 0, len(packagePins))
-		for _, packagePin := range packagePins {
-			packageName, _, ok := strings.Cut(packagePin, "=")
-			if !ok {
-				t.Fatalf("invalid test package pin %q", packagePin)
-			}
-			packageNames = append(packageNames, packageName)
-			if count := strings.Count(stage, packageName+"="); count != 1 {
-				t.Errorf("Dockerfile %s runtime stage package %q pin count = %d, want exactly 1", stageName, packageName, count)
-			}
-			if !strings.Contains(stage, packagePin) {
-				t.Errorf("Dockerfile %s runtime stage missing exact package pin %q", stageName, packagePin)
-			}
-		}
-		assertApkPackagesPinned(t, "Dockerfile "+stageName+" runtime stage", stage, packageNames)
+		assertApkUpgradeThenUnpinnedInstall(t, "Dockerfile "+stageName+" runtime stage", stages[stageName], packageNames)
 	}
 }
 
@@ -150,7 +128,6 @@ func TestDockerfileRuntimeTargetsKeepLeastPrivilegeEntrypointsAndServerFeedAcces
 	stages := dockerfileRuntimeStages(t, string(dockerData))
 	server := stages["server"]
 	for _, want := range []string{
-		"git=",
 		"addgroup -S packmon && adduser -S packmon -G packmon",
 		"mkdir -p /data/feeds /usr/share/doc/packmon && chown packmon:packmon /data/feeds",
 		"COPY --from=build /packmon-server /usr/local/bin/packmon-server",
@@ -667,19 +644,6 @@ func TestDockerfileDoesNotMaskGoModuleDownloadFailures(t *testing.T) {
 	}
 }
 
-func TestDockerfileDoesNotUpgradeAlpinePackagesAtBuildTime(t *testing.T) {
-	t.Parallel()
-
-	dockerfile := filepath.Join("..", "..", "Dockerfile")
-	dockerData, err := os.ReadFile(dockerfile) //nolint:gosec // static repository fixture path
-	if err != nil {
-		t.Fatalf("read Dockerfile: %v", err)
-	}
-	if strings.Contains(string(dockerData), "apk upgrade") {
-		t.Fatal("Dockerfile must not run apk upgrade at build time; use pinned base images and explicit package installs")
-	}
-}
-
 func TestDeploymentAndIntegrationContainerImagesAreDigestPinned(t *testing.T) {
 	t.Parallel()
 
@@ -1013,39 +977,48 @@ func TestDockerComposeServerUsesPreparedFeedDataDirectory(t *testing.T) {
 	}
 }
 
-func assertApkPackagesPinned(t *testing.T, source, text string, packageNames []string) {
+// assertApkUpgradeThenUnpinnedInstall enforces the operator rule for images
+// built from this repository: the runtime stage runs the distribution's
+// unpinned upgrade and installs exactly the expected packages without any
+// version constraint, so a rebuild takes Alpine's current security updates
+// instead of failing on a retired exact version.
+func assertApkUpgradeThenUnpinnedInstall(t *testing.T, source, stage string, packageNames []string) {
 	t.Helper()
 
-	normalized := regexp.MustCompile(`\\r?\n\s*`).ReplaceAllString(text, " ")
-	apkAddRE := regexp.MustCompile(`apk\s+add\s+--no-cache\s+([^&;\r\n]+)`)
-	versionPinRE := regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~:-]*-r[0-9]+$`)
-	found := make(map[string]bool, len(packageNames))
+	commentRE := regexp.MustCompile(`(?m)^\s*#.*\r?\n`)
+	continuationRE := regexp.MustCompile(`\\r?\n\s*`)
+	normalized := continuationRE.ReplaceAllString(commentRE.ReplaceAllString(stage, ""), " ")
 
-	for _, match := range apkAddRE.FindAllStringSubmatch(normalized, -1) {
-		for _, token := range strings.Fields(match[1]) {
-			token = strings.Trim(token, `"'`)
-			if token == "" || strings.HasPrefix(token, "-") {
-				continue
-			}
-			for _, packageName := range packageNames {
-				if token == packageName {
-					t.Fatalf("%s installs Alpine package %q without an exact version pin", source, packageName)
-				}
-				if !strings.HasPrefix(token, packageName+"=") {
-					continue
-				}
-				found[packageName] = true
-				version := strings.TrimPrefix(token, packageName+"=")
-				if !versionPinRE.MatchString(version) {
-					t.Fatalf("%s installs Alpine package %q with non-exact pin %q; want name=version-rN", source, packageName, token)
-				}
-			}
-		}
+	upgradeRE := regexp.MustCompile(`apk\s+upgrade\s+--no-cache(\s|$)`)
+	upgrades := upgradeRE.FindAllStringIndex(normalized, -1)
+	if len(upgrades) != 1 {
+		t.Fatalf("%s runs `apk upgrade --no-cache` %d times, want exactly 1", source, len(upgrades))
 	}
 
-	for _, packageName := range packageNames {
-		if !found[packageName] {
-			t.Fatalf("%s does not install expected Alpine package %q with name=version-rN", source, packageName)
+	apkAddRE := regexp.MustCompile(`apk\s+add\s+--no-cache\s+([^&;\r\n]+)`)
+	adds := apkAddRE.FindAllStringSubmatchIndex(normalized, -1)
+	if len(adds) != 1 {
+		t.Fatalf("%s runs `apk add --no-cache` %d times, want exactly 1", source, len(adds))
+	}
+	if adds[0][0] < upgrades[0][1] {
+		t.Fatalf("%s must run `apk upgrade --no-cache` before `apk add --no-cache`", source)
+	}
+
+	var installed []string
+	for _, token := range strings.Fields(normalized[adds[0][2]:adds[0][3]]) {
+		token = strings.Trim(token, `"'`)
+		if token == "" || strings.HasPrefix(token, "-") {
+			continue
 		}
+		if strings.ContainsAny(token, "=<>~") {
+			t.Fatalf("%s pins Alpine package %q; runtime packages must stay unpinned", source, token)
+		}
+		installed = append(installed, token)
+	}
+	slices.Sort(installed)
+	want := slices.Clone(packageNames)
+	slices.Sort(want)
+	if !slices.Equal(installed, want) {
+		t.Fatalf("%s installs Alpine packages %q, want exactly %q", source, installed, want)
 	}
 }

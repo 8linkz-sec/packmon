@@ -31,10 +31,16 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 # hadolint ignore=DL3006
 FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS server
 
-RUN apk add --no-cache \
-      ca-certificates=20261020-r0 \
-      git=2.54.0-r0 \
-      tzdata=2026f-r0 && \
+# Runtime packages are deliberately unpinned: every build first upgrades the
+# base image's packages and then installs the current Alpine release of each
+# package, so the image always carries the distribution's security updates
+# and never fails when Alpine retires an exact package version.
+# hadolint ignore=DL3018
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
+      ca-certificates \
+      git \
+      tzdata && \
     addgroup -S packmon && adduser -S packmon -G packmon && \
     mkdir -p /data/feeds /usr/share/doc/packmon && chown packmon:packmon /data/feeds
 COPY --from=build /packmon-server /usr/local/bin/packmon-server
@@ -60,9 +66,12 @@ ENTRYPOINT ["packmon-server"]
 # hadolint ignore=DL3006
 FROM ${PACKMON_ALPINE_RUNTIME_IMAGE} AS cli
 
-RUN apk add --no-cache \
-      ca-certificates=20261020-r0 \
-      tzdata=2026f-r0 && \
+# Unpinned on purpose; see the server stage.
+# hadolint ignore=DL3018
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
+      ca-certificates \
+      tzdata && \
     addgroup -S packmon && adduser -S packmon -G packmon && \
     mkdir -p /usr/share/doc/packmon
 COPY --from=build /packmon /usr/local/bin/packmon
