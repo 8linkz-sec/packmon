@@ -796,6 +796,13 @@
   PSScriptAnalyzer 1.25.0, ShellCheck 0.11.0 and hadolint 2.15.1 for the
   developer gates; Node.js 26.13.1 in CI. Web asset builds now need Node.js
   24.15.0 or newer (Stylelint 18 engine floor).
+- The `go.yaml.in/yaml/v4` move keeps how configs, lockfiles and Compose
+  files decode, with two visible differences. YAML type and unknown-field
+  errors now read `yaml: construct errors: line N: ...` on one line (v3
+  printed `yaml: unmarshal errors:` followed by one indented line per error,
+  and `cannot unmarshal` is now `cannot construct`). A fractional number for
+  an integer setting, such as `timeout: 1.5` in a CLI config file, is now
+  rejected instead of being silently truncated to `1`.
 - Auto-SBOM generators move to `@cyclonedx/cyclonedx-npm` 7.0.1 (was 5.0.0)
   and `cyclonedx-bom` 8.0.1 (was 7.3.0), the same pins as
   `requirements/packmon-tools.tsv`; `cyclonedx-maven-plugin` moves to 2.9.3
