@@ -11,7 +11,7 @@ import (
 const (
 	npmGeneratorVersion  = "7.0.1"
 	pypiGeneratorVersion = "8.0.1"
-	mavenPluginVersion   = "2.9.1"
+	mavenPluginVersion   = "2.9.3"
 
 	// cycloneDXSpecVersion is the CycloneDX spec version every generated SBOM
 	// uses. Generators get it explicitly so a generator release that moves its

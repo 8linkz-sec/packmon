@@ -798,11 +798,13 @@
   24.15.0 or newer (Stylelint 18 engine floor).
 - Auto-SBOM generators move to `@cyclonedx/cyclonedx-npm` 7.0.1 (was 5.0.0)
   and `cyclonedx-bom` 8.0.1 (was 7.3.0), the same pins as
-  `requirements/packmon-tools.tsv`. Packmon now passes `--spec-version 1.6` to
-  both, so generated and kept SBOMs stay on CycloneDX 1.6 although
-  `cyclonedx-npm` 7 defaults to 1.7; components and dependency edges are
-  unchanged. Operator action: an existing PATH install of the old generator
-  now fails the version check (`required SBOM generator "cyclonedx-npm"
+  `requirements/packmon-tools.tsv`; `cyclonedx-maven-plugin` moves to 2.9.3
+  (was 2.9.1). Packmon now passes `--spec-version 1.6` to both CLI generators
+  and `-DschemaVersion=1.6` to the Maven plugin, so generated and kept SBOMs
+  stay on CycloneDX 1.6 although `cyclonedx-npm` 7 defaults to 1.7;
+  components and dependency edges are unchanged. Operator action: an existing
+  PATH install of the old generator now fails the version check
+  (`required SBOM generator "cyclonedx-npm"
   version 7.0.1, found 5.0.0`); rerun once with `--install-tools` to install
   the pinned release, or run `scripts/bootstrap`.
 
