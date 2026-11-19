@@ -102,13 +102,11 @@ func TestWriteListAllHTMLReportsRenderFailureWhenPipeReaderCloses(t *testing.T) 
 	}
 	if read.err != nil {
 		closeKeeper()
-		<-writeDone
-		t.Fatalf("read first HTML byte: %v", read.err)
+		t.Fatalf("read first HTML byte: %v (writer returned %v)", read.err, <-writeDone)
 	}
 	if read.count != 1 {
 		closeKeeper()
-		<-writeDone
-		t.Fatalf("HTML FIFO read count = %d, want 1", read.count)
+		t.Fatalf("HTML FIFO read count = %d, want 1 (writer returned %v)", read.count, <-writeDone)
 	}
 
 	// With both readers closed, the still-streaming template render must see
