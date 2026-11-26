@@ -159,3 +159,93 @@ go-test-integration:
     - packages=$(bash scripts/tagged-test-packages.sh integration)
     - docker_only=$(grep -v -e '^#' -e '^[[:space:]]*$' .gitlab/integration-docker-only.txt | sed 's/[[:space:]]*#.*//' | paste -sd '|' -)
     - PACKMON_TEST_BIN_DIR="$CI_PROJECT_DIR" go test -count=1 -p 1 -timeout=30m -tags integration -skip "^(${docker_only})\$" $packages
+
+# The remaining gates of `make verify` that no template job runs. Each repeats its Makefile recipe with the
+# Makefile's pins (tests/ci TestGitLabLocalGateJobsMatchMakefilePins), as a separate job so one finding never
+# hides another. Gates the pipeline already covers: golangci-lint ./... (also the gofumpt formatter of
+# .golangci.yml), go vet, go test (tests/ci included) and -race, govulncheck, lint:web and lint:openapi
+# (node-check), the image scan of security-images (container-scan).
+
+# lint-shell. The image carries the Makefile's exact release tag (no line tag exists, see the Makefile).
+shellcheck:
+  stage: lint
+  image:
+    name: koalaman/shellcheck-alpine:v0.11.0
+    entrypoint: [""]
+  needs: []
+  script:
+    - shellcheck --version
+    - shellcheck scripts/*.sh scripts/lib/*.sh deploy/n8n/*.sh
+
+# lint-docker, reading the Dockerfile from stdin like the Makefile.
+hadolint:
+  stage: lint
+  image:
+    name: hadolint/hadolint:v2.15.1-alpine
+    entrypoint: [""]
+  needs: []
+  script:
+    - hadolint --version
+    - hadolint - < Dockerfile
+
+# lint-nongo: line endings, final newlines and trailing whitespace of the non-Go files.
+non-go-format:
+  extends: .go-base
+  stage: lint
+  needs: []
+  script:
+    - make lint-nongo
+
+# lint-powershell. ErrorActionPreference Stop: without it a PSScriptAnalyzer that cannot load (for example on a
+# too old PowerShell) only writes an error and the empty finding list passes. The image follows the 7.5 line, the
+# newest Linux line Microsoft publishes on MCR.
+psscriptanalyzer:
+  stage: lint
+  image: mcr.microsoft.com/powershell:7.5-ubuntu-24.04
+  needs: []
+  script:
+    - >-
+      pwsh -NoLogo -NoProfile -Command "\$ErrorActionPreference = 'Stop';
+      \$PSVersionTable.PSVersion.ToString();
+      Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force;
+      \$findings = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error;
+      if (\$findings) { \$findings; exit 1 }"
+
+# The 79.5 % total coverage floor `make test` enforces, on the coverage.out of go-test.
+go-coverage-gate:
+  extends: .go-base
+  stage: lint
+  needs:
+    - job: go-test
+      artifacts: true
+  script:
+    - go run ./tools/checkcoverage -profile=coverage.out -min=79.5
+
+# The gosec run of `make security`, with its #nosec discipline (golangci-lint's gosec does not enforce it).
+gosec:
+  extends: .go-base
+  stage: security
+  needs: []
+  script:
+    - go run github.com/securego/gosec/v2/cmd/gosec@latest -nosec-require-rules -nosec-require-justification $(go list -f '{{.Dir}}' ./...)
+
+# The library scan of `make security` (go.mod and package-lock.json); --pkg-types replaces the deprecated
+# --vuln-type of the Makefile.
+trivy-fs:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  needs: []
+  variables:
+    TRIVY_NO_PROGRESS: "true"
+    TRIVY_SKIP_VERSION_CHECK: "true"
+  script:
+    - trivy --version
+    - trivy fs --scanners vuln --pkg-types library --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --skip-dirs .gotmp,.build .
+
+# `make security` audits every dependency, dev tooling included; the template job omits the dev dependencies.
+npm-audit:
+  script:
+    - cd "$NODE_DIR"
+    - npm audit --audit-level=high
