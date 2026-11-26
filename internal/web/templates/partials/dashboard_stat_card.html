@@ -23,27 +23,22 @@
 {{define "dashboard-stat-card-frame"}}
 {{if .Href}}
 <a href="{{.Href}}" class="{{.CardClass}}{{if .AlignClass}} {{.AlignClass}}{{end}}{{if .InteractiveClass}} {{.InteractiveClass}}{{end}}">
-  <dl>
-    <dt class="{{.LabelClass}}">{{.Label}}</dt>
-    {{template "dashboard-stat-card-value" .}}
-  </dl>
+  {{template "dashboard-stat-card-list" .}}
 </a>
 {{else}}
 <div class="{{.CardClass}}{{if .AlignClass}} {{.AlignClass}}{{end}}">
-  <dl>
-    <dt class="{{.LabelClass}}">{{.Label}}</dt>
-    {{template "dashboard-stat-card-value" .}}
-  </dl>
+  {{template "dashboard-stat-card-list" .}}
 </div>
 {{end}}
 {{end}}
 
-{{/* PlainValue skips data-local-number: the client-side number formatter would
-     mangle composite values such as "9 / 9". */}}
-{{define "dashboard-stat-card-value"}}
-{{if .PlainValue}}
-<dd class="{{.ValueClass}}">{{.Value}}</dd>
-{{else}}
-<dd class="{{.ValueClass}}" data-local-number="{{.Value}}">{{.Value}}</dd>
-{{end}}
+{{/* The description list and its term and value items live in one define so
+     the partial stays valid markup on its own. PlainValue skips
+     data-local-number: the client-side number formatter would mangle
+     composite values such as "9 / 9". */}}
+{{define "dashboard-stat-card-list"}}
+<dl>
+  <dt class="{{.LabelClass}}">{{.Label}}</dt>
+  <dd class="{{.ValueClass}}"{{if not .PlainValue}} data-local-number="{{.Value}}"{{end}}>{{.Value}}</dd>
+</dl>
 {{end}}

@@ -330,16 +330,16 @@
 
       if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
         setCopyStatus(status, "Copying API key.");
-        try {
-          var clipboardWrite = navigator.clipboard.writeText(target.value || "");
-          void Promise.resolve(clipboardWrite).then(function () {
-            setCopyStatus(status, "API key copied to clipboard.");
-          }).catch(function () {
-            handleCopyFailure(status, target);
-          });
-        } catch {
+        // The executor runs writeText synchronously inside the click and turns a
+        // synchronous writeText error into a rejection, so the one .catch below
+        // handles both failure forms without a try/catch around the Promise.
+        void new Promise(function (resolve) {
+          resolve(navigator.clipboard.writeText(target.value || ""));
+        }).then(function () {
+          setCopyStatus(status, "API key copied to clipboard.");
+        }).catch(function () {
           handleCopyFailure(status, target);
-        }
+        });
       } else {
         handleCopyFailure(status, target, "Clipboard unavailable. API key selected for manual copying.");
       }
