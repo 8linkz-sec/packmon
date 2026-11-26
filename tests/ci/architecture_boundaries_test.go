@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -803,27 +804,21 @@ func TestCLILocalDBCommandsDoNotQuerySQLiteSchema(t *testing.T) {
 func TestAdminHandlerUsesConsumerOwnedStoreInterface(t *testing.T) {
 	t.Parallel()
 
-	root := filepath.Join("..", "..")
-	checks := map[string][]string{
-		"internal/api/admin/handler.go": {
-			"store           db.Store",
-			"func NewAdminHandler(ctx context.Context, store db.Store",
-		},
-		"internal/api/admin/routes.go": {
-			"func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store",
-		},
+	// The admin store arrives through admin.Dependencies.Store and is kept in
+	// AdminHandler.store. Neither field may be the monolithic db.Store; the
+	// patterns tolerate any gofumpt field alignment.
+	const rel = "internal/api/admin/handler.go"
+	forbidden := []*regexp.Regexp{
+		regexp.MustCompile(`(?m)^\s*[Ss]tore\s+db\.Store\b`),
 	}
-	for rel, forbidden := range checks {
-		path := filepath.Join(root, filepath.FromSlash(rel))
-		source, err := os.ReadFile(path) // #nosec G304 -- test reads fixed repository source from a static allowlist.
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		text := string(source)
-		for _, marker := range forbidden {
-			if strings.Contains(text, marker) {
-				t.Fatalf("%s still accepts monolithic db.Store via %q", rel, marker)
-			}
+	path := filepath.Join("..", "..", filepath.FromSlash(rel))
+	source, err := os.ReadFile(path) // #nosec G304 -- test reads fixed repository source from a static allowlist.
+	if err != nil {
+		t.Fatalf("read %s: %v", rel, err)
+	}
+	for _, pattern := range forbidden {
+		if match := pattern.Find(source); match != nil {
+			t.Fatalf("%s still accepts monolithic db.Store via %q", rel, strings.TrimSpace(string(match)))
 		}
 	}
 }
