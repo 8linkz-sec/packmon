@@ -447,7 +447,7 @@ func newAdminHandlerForStore(t *testing.T, store db.Store, cfg *config.Config) (
 	} else {
 		runtime = config.NewRuntimeSettings("CRITICAL", 60, 60)
 	}
-	handler := NewAdminHandler(ctx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, runtime, nil)
+	handler := NewAdminHandler(ctx, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), Dependencies{Store: store, Sessions: sm, Logger: logger, Config: cfg, Runtime: runtime})
 	handler.SetFeedConfigApplyFunc(func(context.Context, config.FeedSettings) error {
 		return nil
 	})

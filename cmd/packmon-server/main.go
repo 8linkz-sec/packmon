@@ -471,7 +471,16 @@ func buildRuntimeServer(runtime *runtimeConfig, opened *runtimeStore, defaultFee
 		SchemaVersion: runtime.schemaVersion,
 	}
 
-	srv := server.NewWithRuntime(rootCtx, cfg, opened.store, opened.pinger, logger, build, runtimeSettings, syncFeed, applyFeedConfig, resetFeedConfig)
+	srv := server.New(rootCtx, cfg, server.Dependencies{
+		Store:           opened.store,
+		Pinger:          opened.pinger,
+		Logger:          logger,
+		Build:           build,
+		Runtime:         runtimeSettings,
+		SyncFeed:        syncFeed,
+		ApplyFeedConfig: applyFeedConfig,
+		ResetFeedConfig: resetFeedConfig,
+	})
 	return &runtimeServer{
 		rootCtx:    rootCtx,
 		stop:       stop,

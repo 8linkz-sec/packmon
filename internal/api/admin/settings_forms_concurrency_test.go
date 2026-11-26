@@ -60,7 +60,7 @@ func TestSystemSettingsSaveOverlappingRequestsKeepRuntimeEqualToLastCommit(t *te
 		runtime := config.NewRuntimeSettingsFromConfig(cfg)
 		sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		handler := NewAdminHandler(ctx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, runtime, nil)
+		handler := NewAdminHandler(ctx, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), Dependencies{Store: store, Sessions: sm, Logger: logger, Config: cfg, Runtime: runtime})
 
 		save := func(values url.Values) *httptest.ResponseRecorder {
 			req, _ := authenticatedAdminFormRequest(t, sm, "/admin/settings/system", values)
@@ -149,7 +149,7 @@ func TestSystemSettingsSaveCommitSlotWaitFailureUsesGenericSaveMessage(t *testin
 				runtime := config.NewRuntimeSettingsFromConfig(cfg)
 				sm := auth.NewSessionManagerWithIdleTimeout(rootCtx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 				logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-				handler := NewAdminHandler(rootCtx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, runtime, nil)
+				handler := NewAdminHandler(rootCtx, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), Dependencies{Store: store, Sessions: sm, Logger: logger, Config: cfg, Runtime: runtime})
 
 				releaseSlot := make(chan struct{})
 				slotAcquired := make(chan struct{})

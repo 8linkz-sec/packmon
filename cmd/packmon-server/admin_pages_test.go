@@ -3108,7 +3108,9 @@ func newAdminTestHandler(t *testing.T, store *noopStore, cfg *config.Config, syn
 		trigger = syncFeed[0]
 	}
 	runtime := config.NewRuntimeSettingsFromConfig(cfg)
-	handler := admin.NewAdminHandler(context.Background(), store, sm, renderer, logger, cfg, runtime, trigger)
+	handler := admin.NewAdminHandler(context.Background(), renderer, admin.Dependencies{
+		Store: store, Sessions: sm, Logger: logger, Config: cfg, Runtime: runtime, SyncFeed: trigger,
+	})
 	handler.SetFeedConfigApplyFunc(func(context.Context, config.FeedSettings) error {
 		return nil
 	})

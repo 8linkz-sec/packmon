@@ -891,7 +891,7 @@ func newAdminFlowHandler(t *testing.T, store *adminFlowStoreStub, cfg *config.Co
 	if len(syncFeed) > 0 {
 		syncFn = syncFeed[0]
 	}
-	handler := NewAdminHandler(ctx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, runtime, syncFn)
+	handler := NewAdminHandler(ctx, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), Dependencies{Store: store, Sessions: sm, Logger: logger, Config: cfg, Runtime: runtime, SyncFeed: syncFn})
 	handler.SetFeedConfigApplyFunc(func(context.Context, config.FeedSettings) error {
 		return nil
 	})
@@ -1504,7 +1504,7 @@ func TestRegisterRoutesRejectsUnknownAdminSubpaths(t *testing.T) {
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/not-a-real-page")
 	rec := httptest.NewRecorder()
@@ -3646,7 +3646,7 @@ func TestAdminScansRouteRendersScanHistory(t *testing.T) {
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/scans")
 	rec := httptest.NewRecorder()
@@ -3674,7 +3674,7 @@ func TestAdminNotFoundRendersStyledFallback(t *testing.T) {
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/missing-page")
 	rec := httptest.NewRecorder()
@@ -3710,7 +3710,7 @@ func TestAdminNotFoundKeepsMethodSpecificHandling(t *testing.T) {
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodPost, "/admin/missing-page")
 	rec := httptest.NewRecorder()

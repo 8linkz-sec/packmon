@@ -30,7 +30,7 @@ func TestAdminPagesRenderConfiguredFooterLinks(t *testing.T) {
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	loginReq := httptest.NewRequest(http.MethodGet, "/admin/login", nil)
 	authedReq, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/missing-page")
