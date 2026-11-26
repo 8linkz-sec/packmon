@@ -110,7 +110,16 @@ func registerRoutes(deps routeDependencies) {
 	mux.HandleFunc("/api/v1/{path...}", v1.HandleNotFound)
 
 	// -- Admin (session-protected) --------------------------------------------
-	admin.RegisterRoutes(ctx, mux, store, sm, logger, cfg, runtime, syncFeed, applyAndRefreshAPI, resetAndRefreshAPI)
+	admin.RegisterRoutes(ctx, mux, admin.Dependencies{
+		Store:           store,
+		Sessions:        sm,
+		Logger:          logger,
+		Config:          cfg,
+		Runtime:         runtime,
+		SyncFeed:        syncFeed,
+		ApplyFeedConfig: applyAndRefreshAPI,
+		ResetFeedConfig: resetAndRefreshAPI,
+	})
 
 	// -- Web GUI (public pages: dashboard, search, package, feeds) -----------
 	renderer := web.NewRendererWithLayoutLinks(web.TemplateFS(), false, serverLayoutLinks(cfg))

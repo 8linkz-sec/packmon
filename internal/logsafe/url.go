@@ -97,9 +97,9 @@ func RedactDiagnosticMessage(raw string) string {
 }
 
 // BoundedValue strips control characters, collapses whitespace, and truncates
-// a log value to at most max bytes while preserving valid UTF-8.
-func BoundedValue(raw string, max int) string {
-	if max <= 0 {
+// a log value to at most maxBytes bytes while preserving valid UTF-8.
+func BoundedValue(raw string, maxBytes int) string {
+	if maxBytes <= 0 {
 		return ""
 	}
 	value := strings.Join(strings.Fields(strings.Map(func(r rune) rune {
@@ -108,16 +108,16 @@ func BoundedValue(raw string, max int) string {
 		}
 		return r
 	}, raw)), " ")
-	if len(value) <= max {
+	if len(value) <= maxBytes {
 		return value
 	}
-	return truncateUTF8(value, max)
+	return truncateUTF8(value, maxBytes)
 }
 
 // BoundedDiagnosticValue redacts common secret-bearing diagnostic patterns
 // before applying the generic log-value bound.
-func BoundedDiagnosticValue(raw string, max int) string {
-	return BoundedValue(RedactDiagnosticMessage(raw), max)
+func BoundedDiagnosticValue(raw string, maxBytes int) string {
+	return BoundedValue(RedactDiagnosticMessage(raw), maxBytes)
 }
 
 // RemoteErrorSnippet returns a bounded, user-visible HTTP error-body snippet.
@@ -194,14 +194,14 @@ func RequestPathLabel(raw string) string {
 	return unmatchedRoute
 }
 
-func truncateUTF8(value string, max int) string {
-	if max <= 0 {
+func truncateUTF8(value string, maxBytes int) string {
+	if maxBytes <= 0 {
 		return ""
 	}
-	if max <= len(truncationMarker) {
-		return truncationMarker[:max]
+	if maxBytes <= len(truncationMarker) {
+		return truncationMarker[:maxBytes]
 	}
-	limit := max - len(truncationMarker)
+	limit := maxBytes - len(truncationMarker)
 	out := make([]rune, 0, limit)
 	used := 0
 	for _, r := range value {

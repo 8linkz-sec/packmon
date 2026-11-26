@@ -184,25 +184,42 @@ type AdminHandler struct {
 	feedConfigSlot     chan struct{}
 }
 
-// NewAdminHandler creates an AdminHandler with the given dependencies.
-// The provided context controls the lifetime of the background cleanup
+// Dependencies are the collaborators of the admin handlers. Store is narrowed
+// to the consumer-owned admin store interfaces (adaptAdminStore). A nil Logger
+// falls back to slog.Default(); the callbacks may be nil.
+type Dependencies struct {
+	Store           any
+	Sessions        *auth.SessionManager
+	Logger          *slog.Logger
+	Config          *config.Config
+	Runtime         *config.RuntimeSettings
+	SyncFeed        FeedSyncFunc
+	ApplyFeedConfig FeedConfigApplyFunc
+	ResetFeedConfig FeedConfigResetFunc
+}
+
+// NewAdminHandler creates an AdminHandler that renders with renderer and uses
+// deps. The provided context controls the lifetime of the background cleanup
 // goroutine; when the context is cancelled the goroutine exits.
-func NewAdminHandler(ctx context.Context, store any, sm *auth.SessionManager, renderer *web.Renderer, logger *slog.Logger, cfg *config.Config, runtime *config.RuntimeSettings, syncFeed FeedSyncFunc) *AdminHandler {
+func NewAdminHandler(ctx context.Context, renderer *web.Renderer, deps Dependencies) *AdminHandler {
+	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	h := &AdminHandler{
-		store:         adaptAdminStore(store),
-		sm:            sm,
-		renderer:      renderer,
-		logger:        logger,
-		cfg:           cfg,
-		runtime:       runtime,
-		rootCtx:       ctx,
-		syncFeed:      syncFeed,
-		csrfToken:     auth.CSRFToken,
-		loginAttempts: make(map[string]*loginAttempt),
-		manualSyncs:   make(map[string]struct{}),
+		store:           adaptAdminStore(deps.Store),
+		sm:              deps.Sessions,
+		renderer:        renderer,
+		logger:          logger,
+		cfg:             deps.Config,
+		runtime:         deps.Runtime,
+		rootCtx:         ctx,
+		syncFeed:        deps.SyncFeed,
+		applyFeedConfig: deps.ApplyFeedConfig,
+		resetFeedConfig: deps.ResetFeedConfig,
+		csrfToken:       auth.CSRFToken,
+		loginAttempts:   make(map[string]*loginAttempt),
+		manualSyncs:     make(map[string]struct{}),
 	}
 	// Background goroutine to evict stale lockout entries.
 	go h.cleanupAttempts(ctx)

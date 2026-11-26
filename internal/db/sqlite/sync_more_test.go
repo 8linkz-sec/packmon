@@ -1342,7 +1342,7 @@ func TestSyncServerURLErrorsRedactSecretBearingURLValues(t *testing.T) {
 	_, err = fetchSyncPage(context.Background(), client, SyncConfig{
 		ServerURL:         rawURL,
 		AllowInsecureHTTP: true,
-	}, "", "", syncCursor{}, "", "")
+	}, syncCursorState{}, syncCursor{}, syncPageSnapshot{})
 	if err == nil || !strings.Contains(err.Error(), "sync: server request") {
 		t.Fatalf("fetchSyncPage(secret URL request error) = %v", err)
 	}
@@ -2008,7 +2008,7 @@ func TestFetchSyncPageReadErrorIncludesContext(t *testing.T) {
 	_, err := fetchSyncPage(context.Background(), client, SyncConfig{
 		ServerURL: "https://packmon.example",
 		APIKey:    "read-key",
-	}, "2026-05-30T10:00:00Z", "500", syncCursor{VulnerabilitiesCursor: "after-vuln"}, "snap", "600")
+	}, syncCursorState{Since: "2026-05-30T10:00:00Z", SinceXID: "500"}, syncCursor{VulnerabilitiesCursor: "after-vuln"}, syncPageSnapshot{SyncedAt: "snap", SyncedXID: "600"})
 	if err == nil || !strings.Contains(err.Error(), "read response") {
 		t.Fatalf("fetchSyncPage(read error) = %v", err)
 	}
@@ -2032,7 +2032,7 @@ func TestFetchSyncPageRejectsOversizedResponses(t *testing.T) {
 			_, err := fetchSyncPage(context.Background(), server.Client(), SyncConfig{
 				ServerURL:         server.URL,
 				AllowInsecureHTTP: true,
-			}, "", "", syncCursor{}, "", "")
+			}, syncCursorState{}, syncCursor{}, syncPageSnapshot{})
 			if err == nil || !strings.Contains(err.Error(), "response too large") {
 				t.Fatalf("fetchSyncPage(%s) error = %v, want response too large", name, err)
 			}
@@ -2053,7 +2053,7 @@ func TestFetchSyncPageErrorSnippetTruncatesOnUTF8Boundary(t *testing.T) {
 	_, err := fetchSyncPage(context.Background(), server.Client(), SyncConfig{
 		ServerURL:         server.URL,
 		AllowInsecureHTTP: true,
-	}, "", "", syncCursor{}, "", "")
+	}, syncCursorState{}, syncCursor{}, syncPageSnapshot{})
 	if err == nil || !strings.Contains(err.Error(), "server returned 502") {
 		t.Fatalf("fetchSyncPage(non-200) error = %v, want status context", err)
 	}
@@ -2076,7 +2076,7 @@ func TestFetchSyncPageErrorSnippetRedactsResponseBodySecrets(t *testing.T) {
 	_, err := fetchSyncPage(context.Background(), server.Client(), SyncConfig{
 		ServerURL:         server.URL,
 		AllowInsecureHTTP: true,
-	}, "", "", syncCursor{}, "", "")
+	}, syncCursorState{}, syncCursor{}, syncPageSnapshot{})
 	if err == nil {
 		t.Fatal("fetchSyncPage(non-200) error = nil, want status error")
 	}

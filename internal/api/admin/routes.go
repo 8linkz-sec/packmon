@@ -2,10 +2,8 @@ package admin
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 
-	"github.com/8linkz-sec/packmon/internal/auth"
 	"github.com/8linkz-sec/packmon/internal/config"
 	"github.com/8linkz-sec/packmon/internal/web"
 )
@@ -18,22 +16,9 @@ import (
 //
 // The wellKnownChangePassword handler implements the .well-known
 // redirect for password managers (Bitwarden compatibility).
-func RegisterRoutes(
-	ctx context.Context,
-	mux *http.ServeMux,
-	store any,
-	sm *auth.SessionManager,
-	logger *slog.Logger,
-	cfg *config.Config,
-	runtime *config.RuntimeSettings,
-	syncFeed FeedSyncFunc,
-	applyFeedConfig FeedConfigApplyFunc,
-	resetFeedConfig FeedConfigResetFunc,
-) {
-	renderer := web.NewRendererWithLayoutLinks(web.TemplateFS(), false, adminLayoutLinks(cfg))
-	h := NewAdminHandler(ctx, store, sm, renderer, logger, cfg, runtime, syncFeed)
-	h.SetFeedConfigApplyFunc(applyFeedConfig)
-	h.SetFeedConfigResetFunc(resetFeedConfig)
+func RegisterRoutes(ctx context.Context, mux *http.ServeMux, deps Dependencies) {
+	renderer := web.NewRendererWithLayoutLinks(web.TemplateFS(), false, adminLayoutLinks(deps.Config))
+	h := NewAdminHandler(ctx, renderer, deps)
 
 	// Login and logout are handled specially:
 	// - GET /admin/login: show form (no session required)

@@ -29,7 +29,7 @@ func TestRegisterRoutesIncludesWellKnownPasswordRedirect(t *testing.T) {
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	mux := http.NewServeMux()
 
-	RegisterRoutes(ctx, mux, store, sm, nil, cfg, config.NewRuntimeSettings("CRITICAL", 60, 60), nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Config: cfg, Runtime: config.NewRuntimeSettings("CRITICAL", 60, 60)})
 
 	req := httptest.NewRequest(http.MethodGet, "/.well-known/change-password", nil)
 	rec := httptest.NewRecorder()

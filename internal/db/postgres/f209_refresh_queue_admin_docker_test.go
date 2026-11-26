@@ -71,17 +71,17 @@ func TestF209RefreshQueueAdminStateAndAuditContractsAgainstPostgres(t *testing.T
 	if err := store.UpdateQueueJobPriorityWithAudit(ctx, pendingOld, 0, queueAuditEntry("f209_priority", pendingOld)); err != nil {
 		t.Fatalf("UpdateQueueJobPriorityWithAudit() error = %v", err)
 	}
-	assertF209QueueAuditTransition(t, store, ctx, "f209_priority", db.RefreshStatusPending, db.RefreshStatusPending, 3, 0)
+	assertF209QueueAuditTransition(t, store, ctx, "f209_priority", f209QueueState{db.RefreshStatusPending, 3}, f209QueueState{db.RefreshStatusPending, 0})
 
 	if err := store.PauseQueueJobWithAudit(ctx, pendingOld, queueAuditEntry("f209_pause", pendingOld)); err != nil {
 		t.Fatalf("PauseQueueJobWithAudit() error = %v", err)
 	}
-	assertF209QueueAuditTransition(t, store, ctx, "f209_pause", db.RefreshStatusPending, db.RefreshStatusPaused, 0, 0)
+	assertF209QueueAuditTransition(t, store, ctx, "f209_pause", f209QueueState{db.RefreshStatusPending, 0}, f209QueueState{db.RefreshStatusPaused, 0})
 
 	if err := store.ResumeQueueJobWithAudit(ctx, pendingOld, queueAuditEntry("f209_resume", pendingOld)); err != nil {
 		t.Fatalf("ResumeQueueJobWithAudit() error = %v", err)
 	}
-	assertF209QueueAuditTransition(t, store, ctx, "f209_resume", db.RefreshStatusPaused, db.RefreshStatusPending, 0, 0)
+	assertF209QueueAuditTransition(t, store, ctx, "f209_resume", f209QueueState{db.RefreshStatusPaused, 0}, f209QueueState{db.RefreshStatusPending, 0})
 
 	if err := store.RetryQueueJobWithAudit(ctx, pausedID, queueAuditEntry("f209_retry", pausedID)); err != nil {
 		t.Fatalf("RetryQueueJobWithAudit(paused) error = %v", err)
@@ -90,7 +90,7 @@ func TestF209RefreshQueueAdminStateAndAuditContractsAgainstPostgres(t *testing.T
 	if retried.Status != db.RefreshStatusPending || retried.ProcessedAt != nil || retried.Error != "" || !retried.RequestedAt.After(base) {
 		t.Fatalf("retried paused job = %+v, want fresh pending state", retried)
 	}
-	assertF209QueueAuditTransition(t, store, ctx, "f209_retry", db.RefreshStatusPaused, db.RefreshStatusPending, 2, 2)
+	assertF209QueueAuditTransition(t, store, ctx, "f209_retry", f209QueueState{db.RefreshStatusPaused, 2}, f209QueueState{db.RefreshStatusPending, 2})
 
 	if err := store.UpdateQueueJobPriority(ctx, pendingNew, 1); err != nil {
 		t.Fatalf("UpdateQueueJobPriority() error = %v", err)
@@ -290,15 +290,21 @@ func TestF209RefreshQueueAdminClosedPoolErrorsReturnNoPartialResults(t *testing.
 	}
 }
 
-func assertF209QueueAuditTransition(t *testing.T, store *Store, ctx context.Context, action, beforeStatus, afterStatus string, beforePriority, afterPriority int) {
+// f209QueueState is the status and priority a queue audit records for a job.
+type f209QueueState struct {
+	status   string
+	priority int
+}
+
+func assertF209QueueAuditTransition(t *testing.T, store *Store, ctx context.Context, action string, before, after f209QueueState) {
 	t.Helper()
 	entry := f209LatestQueueAudit(t, store, ctx, action)
 	details := queueAuditDetailsFromEntry(t, entry)
-	if details["previous_status"] != beforeStatus || details["new_status"] != afterStatus ||
-		details["previous_priority"] != strconv.Itoa(beforePriority) || details["new_priority"] != strconv.Itoa(afterPriority) {
+	if details["previous_status"] != before.status || details["new_status"] != after.status ||
+		details["previous_priority"] != strconv.Itoa(before.priority) || details["new_priority"] != strconv.Itoa(after.priority) {
 		t.Fatalf("%s transition audit details = %#v", action, details)
 	}
-	if previous, next := queueAuditJobsFromEntry(t, entry, "previous_job"), queueAuditJobsFromEntry(t, entry, "new_job"); len(previous) != 1 || len(next) != 1 || previous[0].Status != beforeStatus || next[0].Status != afterStatus {
+	if previous, next := queueAuditJobsFromEntry(t, entry, "previous_job"), queueAuditJobsFromEntry(t, entry, "new_job"); len(previous) != 1 || len(next) != 1 || previous[0].Status != before.status || next[0].Status != after.status {
 		t.Fatalf("%s transition snapshots = %+v -> %+v", action, previous, next)
 	}
 }

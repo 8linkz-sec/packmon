@@ -121,11 +121,11 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 		t.Fatalf("POST /api/v1/check without auth status = %d, want 401", respNoAuth.StatusCode)
 	}
 
-	assertProductionAPIStatus(t, http.MethodPost, baseURL+"/api/v1/check", apiKey, "", checkReqBody, http.StatusForbidden, "missing User-Agent")
-	assertProductionAPIStatus(t, http.MethodPost, baseURL+"/api/v1/check", apiKey, "unknown-client/integration", checkReqBody, http.StatusForbidden, "unknown User-Agent")
-	assertProductionAPIStatus(t, http.MethodPost, baseURL+"/api/v1/check", expiredAPIKey, "packmon-cli/integration", checkReqBody, http.StatusUnauthorized, "expired API key")
-	assertProductionAPIStatus(t, http.MethodPost, baseURL+"/api/v1/check", revokedAPIKey, "packmon-cli/integration", checkReqBody, http.StatusUnauthorized, "revoked API key")
-	assertProductionAPIStatus(t, http.MethodPost, baseURL+"/api/v1/check", deletedAPIKey, "packmon-cli/integration", checkReqBody, http.StatusUnauthorized, "deleted API key")
+	assertProductionAPIStatus(t, newProductionAPIRequest(t, http.MethodPost, baseURL+"/api/v1/check", apiKey, "", checkReqBody), http.StatusForbidden, "missing User-Agent")
+	assertProductionAPIStatus(t, newProductionAPIRequest(t, http.MethodPost, baseURL+"/api/v1/check", apiKey, "unknown-client/integration", checkReqBody), http.StatusForbidden, "unknown User-Agent")
+	assertProductionAPIStatus(t, newProductionAPIRequest(t, http.MethodPost, baseURL+"/api/v1/check", expiredAPIKey, "packmon-cli/integration", checkReqBody), http.StatusUnauthorized, "expired API key")
+	assertProductionAPIStatus(t, newProductionAPIRequest(t, http.MethodPost, baseURL+"/api/v1/check", revokedAPIKey, "packmon-cli/integration", checkReqBody), http.StatusUnauthorized, "revoked API key")
+	assertProductionAPIStatus(t, newProductionAPIRequest(t, http.MethodPost, baseURL+"/api/v1/check", deletedAPIKey, "packmon-cli/integration", checkReqBody), http.StatusUnauthorized, "deleted API key")
 	assertProductionCheckIdempotency(t, baseURL, apiKey)
 
 	importBody, err := json.Marshal(map[string]any{
@@ -149,7 +149,7 @@ func TestProductionServerWithPostgresAndAPIKey(t *testing.T) {
 		t.Fatalf("json.Marshal import body: %v", err)
 	}
 
-	assertProductionAPIStatus(t, http.MethodPost, baseURL+"/api/v1/feeds/openssf/import", apiKey, "packmon-cli/integration", importBody, http.StatusForbidden, "missing feed import secret")
+	assertProductionAPIStatus(t, newProductionAPIRequest(t, http.MethodPost, baseURL+"/api/v1/feeds/openssf/import", apiKey, "packmon-cli/integration", importBody), http.StatusForbidden, "missing feed import secret")
 	importWrongSecretReq := newProductionAPIRequest(t, http.MethodPost, baseURL+"/api/v1/feeds/openssf/import", apiKey, "packmon-cli/integration", importBody)
 	importWrongSecretReq.Header.Set("X-Packmon-Feed-Import-Secret", "wrong-secret")
 	importWrongSecretResp, err := integrationHTTPDo(importWrongSecretReq)
@@ -955,10 +955,10 @@ const productionQueueDynamicTimestamp = "<dynamic>"
 func exerciseProductionAdminQueueRoutes(t *testing.T, containerName, baseURL string, client *http.Client) {
 	t.Helper()
 
-	clearID := insertProductionQueueJob(t, containerName, "admin-clear-prod", 3, "pending", "2026-01-04T00:00:00Z", "", "")
-	purgeDoneID := insertProductionQueueJob(t, containerName, "admin-purge-done-prod", 2, "done", "2026-01-05T00:00:00Z", "2026-01-05T01:00:00Z", "")
-	purgeErrorID := insertProductionQueueJob(t, containerName, "admin-purge-error-prod", 1, "error", "2026-01-06T00:00:00Z", "2026-01-06T01:00:00Z", "purge fixture failure")
-	processingID := insertProductionQueueJob(t, containerName, "admin-processing-control-prod", 0, "processing", "2026-01-07T00:00:00Z", "2026-01-07T01:00:00Z", "")
+	clearID := insertProductionQueueJob(t, containerName, productionQueueJobSeed{"admin-clear-prod", 3, "pending", "2026-01-04T00:00:00Z", "", ""})
+	purgeDoneID := insertProductionQueueJob(t, containerName, productionQueueJobSeed{"admin-purge-done-prod", 2, "done", "2026-01-05T00:00:00Z", "2026-01-05T01:00:00Z", ""})
+	purgeErrorID := insertProductionQueueJob(t, containerName, productionQueueJobSeed{"admin-purge-error-prod", 1, "error", "2026-01-06T00:00:00Z", "2026-01-06T01:00:00Z", "purge fixture failure"})
+	processingID := insertProductionQueueJob(t, containerName, productionQueueJobSeed{"admin-processing-control-prod", 0, "processing", "2026-01-07T00:00:00Z", "2026-01-07T01:00:00Z", ""})
 	processingBefore := productionQueueRowSnapshot(t, containerName, processingID)
 
 	queueBody := adminGETBody(t, client, baseURL+"/admin/queue")
@@ -972,14 +972,14 @@ func exerciseProductionAdminQueueRoutes(t *testing.T, containerName, baseURL str
 	assertPostgresValue(t, containerName,
 		fmt.Sprintf(`SELECT COUNT(*)::text FROM refresh_queue WHERE id = %d`, clearID),
 		"0", "queue clear deletion")
-	assertProductionQueueDeleteAudit(t, containerName, "queue_clear", clearCorrelation, "cleared_jobs", "cleared", "pending", []productionQueueAuditJob{{
+	assertProductionQueueDeleteAudit(t, containerName, productionQueueDeleteAudit{"queue_clear", clearCorrelation, "cleared_jobs", "cleared", "pending"}, []productionQueueAuditJob{{
 		ID: clearID, Ecosystem: "npm", Name: "admin-clear-prod", Source: "osv", Priority: 3, Status: "pending", RequestedAt: "2026-01-04T00:00:00Z",
 	}})
 	assertProductionQueueRowSnapshot(t, containerName, processingID, processingBefore, "processing control after clear")
 
-	priorityID := insertProductionQueueJob(t, containerName, "admin-priority-prod", 3, "pending", "2026-01-01T00:00:00Z", "", "")
-	pauseResumeID := insertProductionQueueJob(t, containerName, "admin-pause-resume-prod", 2, "pending", "2026-01-02T00:00:00Z", "", "")
-	retryID := insertProductionQueueJob(t, containerName, "admin-retry-prod", 1, "error", "2026-01-03T00:00:00Z", "2026-01-03T01:00:00Z", "retry fixture failure")
+	priorityID := insertProductionQueueJob(t, containerName, productionQueueJobSeed{"admin-priority-prod", 3, "pending", "2026-01-01T00:00:00Z", "", ""})
+	pauseResumeID := insertProductionQueueJob(t, containerName, productionQueueJobSeed{"admin-pause-resume-prod", 2, "pending", "2026-01-02T00:00:00Z", "", ""})
+	retryID := insertProductionQueueJob(t, containerName, productionQueueJobSeed{"admin-retry-prod", 1, "error", "2026-01-03T00:00:00Z", "2026-01-03T01:00:00Z", "retry fixture failure"})
 
 	priorityCorrelation := "00000000-0000-4000-8000-000000000061"
 	adminPostFormWithCorrelation(t, client, baseURL+"/admin/queue/priority", url.Values{
@@ -1040,7 +1040,7 @@ func exerciseProductionAdminQueueRoutes(t *testing.T, containerName, baseURL str
 	assertPostgresValue(t, containerName,
 		fmt.Sprintf(`SELECT COUNT(*)::text FROM refresh_queue WHERE id IN (%d,%d)`, purgeDoneID, purgeErrorID),
 		"0", "queue purge deletion")
-	assertProductionQueueDeleteAudit(t, containerName, "queue_purge", purgeCorrelation, "purged_jobs", "purged", "", []productionQueueAuditJob{
+	assertProductionQueueDeleteAudit(t, containerName, productionQueueDeleteAudit{"queue_purge", purgeCorrelation, "purged_jobs", "purged", ""}, []productionQueueAuditJob{
 		{ID: purgeDoneID, Ecosystem: "npm", Name: "admin-purge-done-prod", Source: "osv", Priority: 2, Status: "done", RequestedAt: "2026-01-05T00:00:00Z", ProcessedAt: "2026-01-05T01:00:00Z"},
 		{ID: purgeErrorID, Ecosystem: "npm", Name: "admin-purge-error-prod", Source: "osv", Priority: 1, Status: "error", RequestedAt: "2026-01-06T00:00:00Z", ProcessedAt: "2026-01-06T01:00:00Z", Error: "purge fixture failure"},
 	})
@@ -1065,8 +1065,20 @@ func assertProductionQueueRowSnapshot(t *testing.T, containerName string, id int
 	}
 }
 
-func insertProductionQueueJob(t *testing.T, containerName, name string, priority int, status, requestedAt, processedAt, errorText string) int {
+// productionQueueJobSeed is one npm/osv refresh_queue fixture row; an empty
+// processedAt or errorText is stored as NULL.
+type productionQueueJobSeed struct {
+	name        string
+	priority    int
+	status      string
+	requestedAt string
+	processedAt string
+	errorText   string
+}
+
+func insertProductionQueueJob(t *testing.T, containerName string, seed productionQueueJobSeed) int {
 	t.Helper()
+	name, priority, status, requestedAt, processedAt, errorText := seed.name, seed.priority, seed.status, seed.requestedAt, seed.processedAt, seed.errorText
 	processedSQL := "NULL"
 	if processedAt != "" {
 		processedSQL = postgresLiteral(processedAt) + "::timestamptz"
@@ -1113,12 +1125,20 @@ func assertProductionQueueTransitionAudit(
 	return before[0], after[0]
 }
 
-func assertProductionQueueDeleteAudit(
-	t *testing.T,
-	containerName, action, correlationID, jobsKey, countKey, status string,
-	wantJobs []productionQueueAuditJob,
-) {
+// productionQueueDeleteAudit identifies one queue clear or purge audit entry:
+// its action and correlation ID, the detail keys of the job sample and count,
+// and the status filter it recorded ("" when the action has none).
+type productionQueueDeleteAudit struct {
+	action        string
+	correlationID string
+	jobsKey       string
+	countKey      string
+	status        string
+}
+
+func assertProductionQueueDeleteAudit(t *testing.T, containerName string, audit productionQueueDeleteAudit, wantJobs []productionQueueAuditJob) {
 	t.Helper()
+	action, correlationID, jobsKey, countKey, status := audit.action, audit.correlationID, audit.jobsKey, audit.countKey, audit.status
 	details := productionQueueAuditDetails(t, containerName, action, correlationID)
 	jobs := decodeProductionQueueAuditJobs(t, details[jobsKey], action+" "+jobsKey)
 	if len(jobs) != len(wantJobs) {
@@ -1326,10 +1346,11 @@ func newProductionAPIRequest(t *testing.T, method, endpoint, apiKey, userAgent s
 	return req
 }
 
-func assertProductionAPIStatus(t *testing.T, method, endpoint, apiKey, userAgent string, body []byte, want int, label string) {
+func assertProductionAPIStatus(t *testing.T, req *http.Request, want int, label string) {
 	t.Helper()
 
-	resp, err := integrationHTTPDo(newProductionAPIRequest(t, method, endpoint, apiKey, userAgent, body))
+	method, endpoint := req.Method, req.URL.String()
+	resp, err := integrationHTTPDo(req)
 	if err != nil {
 		t.Fatalf("%s: %s %s: %v", label, method, endpoint, err)
 	}

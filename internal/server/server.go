@@ -46,39 +46,30 @@ type Store interface {
 	telemetry.MetricsStore
 }
 
-// New creates a Server with all middleware and routes wired up.
-// The caller must provide a Store implementation and a Pinger for
-// health checks (typically the same pgxpool.Pool satisfies both).
-func New(
-	ctx context.Context,
-	cfg *config.Config,
-	store Store,
-	pinger health.Pinger,
-	logger *slog.Logger,
-	build BuildInfo,
-	syncFeed admin.FeedSyncFunc,
-	applyFeedConfig admin.FeedConfigApplyFunc,
-	resetFeedConfig admin.FeedConfigResetFunc,
-) *Server {
-	return NewWithRuntime(ctx, cfg, store, pinger, logger, build, config.NewRuntimeSettingsFromConfig(cfg), syncFeed, applyFeedConfig, resetFeedConfig)
+// Dependencies are the collaborators New wires into the server.
+type Dependencies struct {
+	// Store is the persistence boundary and Pinger the health-check target
+	// (typically the same pgxpool-backed store satisfies both).
+	Store  Store
+	Pinger health.Pinger
+	Logger *slog.Logger
+	Build  BuildInfo
+	// Runtime is the runtime settings holder shared with other process
+	// components such as background services; nil creates one from cfg.
+	Runtime *config.RuntimeSettings
+	// SyncFeed, ApplyFeedConfig and ResetFeedConfig are the admin feed
+	// callbacks; each may be nil.
+	SyncFeed        admin.FeedSyncFunc
+	ApplyFeedConfig admin.FeedConfigApplyFunc
+	ResetFeedConfig admin.FeedConfigResetFunc
 }
 
-// NewWithRuntime creates a Server that shares the supplied runtime settings
-// holder with other process components such as background services.
-func NewWithRuntime(
-	ctx context.Context,
-	cfg *config.Config,
-	store Store,
-	pinger health.Pinger,
-	logger *slog.Logger,
-	build BuildInfo,
-	runtime *config.RuntimeSettings,
-	syncFeed admin.FeedSyncFunc,
-	applyFeedConfig admin.FeedConfigApplyFunc,
-	resetFeedConfig admin.FeedConfigResetFunc,
-) *Server {
+// New creates a Server with all middleware and routes wired up.
+func New(ctx context.Context, cfg *config.Config, deps Dependencies) *Server {
 	devMode := cfg.IsDevelopment()
+	store, pinger, logger, build := deps.Store, deps.Pinger, deps.Logger, deps.Build
 
+	runtime := deps.Runtime
 	if runtime == nil {
 		runtime = config.NewRuntimeSettingsFromConfig(cfg)
 	}
@@ -126,9 +117,9 @@ func NewWithRuntime(
 		sessionManager:  sm,
 		logger:          logger,
 		buildInfo:       build,
-		syncFeed:        syncFeed,
-		applyFeedConfig: applyFeedConfig,
-		resetFeedConfig: resetFeedConfig,
+		syncFeed:        deps.SyncFeed,
+		applyFeedConfig: deps.ApplyFeedConfig,
+		resetFeedConfig: deps.ResetFeedConfig,
 	})
 
 	mainAddr := cfg.Server.Addr()

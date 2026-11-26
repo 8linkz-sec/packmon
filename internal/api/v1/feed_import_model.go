@@ -502,7 +502,7 @@ type feedImportRecordOptions[T any] struct {
 	auditedImport func(context.Context, string, []T, []string, *db.FeedSyncStatus, db.FeedImportAuditBuilder) (int, int, error)
 }
 
-func importFeedRecords[T any](ctx context.Context, h *FeedImportHandler, feed string, statusInput *feedSyncStatusInput, rawItems []T, rawDeleteIDs []string, audit db.FeedImportAuditBuilder, opts feedImportRecordOptions[T]) (*importResponse, error) {
+func importFeedRecords[T any](ctx context.Context, feed string, statusInput *feedSyncStatusInput, rawItems []T, rawDeleteIDs []string, audit db.FeedImportAuditBuilder, opts feedImportRecordOptions[T]) (*importResponse, error) {
 	if err := validateImportStatusInput(statusInput); err != nil {
 		return nil, err
 	}
@@ -551,7 +551,7 @@ func feedImportResponse(feed string, imported, deleted int) *importResponse {
 }
 
 func (h *FeedImportHandler) importVulnerabilities(ctx context.Context, feed string, req *vulnerabilityImportRequest, audit db.FeedImportAuditBuilder) (*importResponse, error) {
-	return importFeedRecords(ctx, h, feed, req.Status, vulnerabilityImportItemsToDB(req.Vulnerabilities), req.DeleteVulnerabilityIDs, audit, feedImportRecordOptions[db.Vulnerability]{
+	return importFeedRecords(ctx, feed, req.Status, vulnerabilityImportItemsToDB(req.Vulnerabilities), req.DeleteVulnerabilityIDs, audit, feedImportRecordOptions[db.Vulnerability]{
 		deleteField: "delete_vulnerability_ids",
 		normalize: func(feed string, index int, item db.Vulnerability) (db.Vulnerability, error) {
 			recordContext := vulnerabilityImportRecordContext(index, item)
@@ -568,7 +568,7 @@ func (h *FeedImportHandler) importVulnerabilities(ctx context.Context, feed stri
 }
 
 func (h *FeedImportHandler) importMalicious(ctx context.Context, feed string, req *maliciousImportRequest, audit db.FeedImportAuditBuilder) (*importResponse, error) {
-	return importFeedRecords(ctx, h, feed, req.Status, maliciousImportItemsToDB(req.Malicious), req.DeleteMaliciousIDs, audit, feedImportRecordOptions[db.MaliciousFinding]{
+	return importFeedRecords(ctx, feed, req.Status, maliciousImportItemsToDB(req.Malicious), req.DeleteMaliciousIDs, audit, feedImportRecordOptions[db.MaliciousFinding]{
 		deleteField: "delete_malicious_ids",
 		normalize: func(feed string, index int, item db.MaliciousFinding) (db.MaliciousFinding, error) {
 			recordContext := maliciousImportRecordContext(index, item)
@@ -1495,9 +1495,9 @@ func validateImportStatusInput(input *feedSyncStatusInput) error {
 	return feedImportValidationErrorf("feed import status %q is not supported", status)
 }
 
-func truncateString(value string, max int) string {
-	if max <= 0 || len(value) <= max {
+func truncateString(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
 		return value
 	}
-	return value[:max]
+	return value[:maxBytes]
 }

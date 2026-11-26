@@ -144,7 +144,10 @@ func skipSQLiteMigrationLock(dbPath string) bool {
 
 func acquireSQLiteSyncLock(ctx context.Context, dbPath string) (func(), error) {
 	if skipSQLiteSyncLock(dbPath) {
-		return func() {}, nil
+		return func() {
+			// No lock file was taken for this database, so there is
+			// nothing to release.
+		}, nil
 	}
 	return acquireSQLiteLockFile(ctx, dbPath+".sync.lock", sqliteSyncLockTimeout, "sync")
 }
@@ -385,9 +388,13 @@ func (s *Store) findVulnerabilitiesBatchChunk(ctx context.Context, chunk localPa
 			return nil, fmt.Errorf("sqlite: scan vulnerability batch row: %w", err)
 		}
 
+		row := localVulnerabilityRow{
+			id: id, ecosystem: eco, name: pkg, rangesJSON: rangesJSON.String, refsJSON: refsJSON.String,
+			severity: severity, summary: summary.String, source: source.String,
+		}
 		versions := chunk.versionsByPackage[localPackageKey{ecosystem: eco, name: pkg}]
 		if len(versions) == 0 {
-			findings = append(findings, localVulnerabilityFinding(id, eco, pkg, "", rangesJSON.String, refsJSON.String, severity, summary.String, source.String))
+			findings = append(findings, localVulnerabilityFinding(row, ""))
 			continue
 		}
 
@@ -399,7 +406,7 @@ func (s *Store) findVulnerabilitiesBatchChunk(ctx context.Context, chunk localPa
 					continue
 				}
 			}
-			findings = append(findings, localVulnerabilityFinding(id, eco, pkg, version, rangesJSON.String, refsJSON.String, severity, summary.String, source.String))
+			findings = append(findings, localVulnerabilityFinding(row, version))
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -409,28 +416,41 @@ func (s *Store) findVulnerabilitiesBatchChunk(ctx context.Context, chunk localPa
 	return findings, nil
 }
 
-func localVulnerabilityFinding(id, ecosystem, name, version, rangesJSON, refsJSON, severity, summary, source string) domain.Finding {
-	title := summary
+// localVulnerabilityRow holds the vulnerabilities_local columns a finding is
+// built from; NULL text columns are read as "".
+type localVulnerabilityRow struct {
+	id         string
+	ecosystem  string
+	name       string
+	rangesJSON string
+	refsJSON   string
+	severity   string
+	summary    string
+	source     string
+}
+
+func localVulnerabilityFinding(row localVulnerabilityRow, version string) domain.Finding {
+	title := row.summary
 	if title == "" {
-		title = id
+		title = row.id
 	}
-	resources := resourceLinksFromVulnerabilityReferences(id, refsJSON)
+	resources := resourceLinksFromVulnerabilityReferences(row.id, row.refsJSON)
 	primaryURL := ""
 	if len(resources) > 0 {
 		primaryURL = resources[0].URL
 	}
 	return domain.Finding{
-		Name:         name,
+		Name:         row.name,
 		Version:      version,
-		Ecosystem:    domain.Ecosystem(ecosystem),
+		Ecosystem:    domain.Ecosystem(row.ecosystem),
 		Type:         domain.FindingTypeVulnerability,
-		Severity:     domain.Severity(severity),
-		AdvisoryID:   id,
+		Severity:     domain.Severity(row.severity),
+		AdvisoryID:   row.id,
 		Title:        title,
 		URL:          primaryURL,
 		Resources:    resources,
-		FixedVersion: versionpkg.ExtractFixedVersionConstraintFor(version, rangesJSON, ecosystem),
-		Source:       localFindingSource(source),
+		FixedVersion: versionpkg.ExtractFixedVersionConstraintFor(version, row.rangesJSON, row.ecosystem),
+		Source:       localFindingSource(row.source),
 	}
 }
 
@@ -480,7 +500,10 @@ func (s *Store) FindMalicious(ctx context.Context, ecosystem, name, version stri
 			continue
 		}
 
-		findings = append(findings, localMaliciousFinding(id, eco, pkg, version, referencesRaw.String, riskType, severity, summary.String, source.String))
+		findings = append(findings, localMaliciousFinding(localMaliciousRow{
+			id: id, ecosystem: eco, name: pkg, referencesRaw: referencesRaw.String, riskType: riskType,
+			severity: severity, summary: summary.String, source: source.String,
+		}, version))
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("sqlite: iterate malicious rows: %w", err)
@@ -539,9 +562,13 @@ func (s *Store) findMaliciousBatchChunk(ctx context.Context, chunk localPackageP
 			return nil, fmt.Errorf("sqlite: scan malicious batch row: %w", err)
 		}
 
+		row := localMaliciousRow{
+			id: id, ecosystem: eco, name: pkg, referencesRaw: referencesRaw.String, riskType: riskType,
+			severity: severity, summary: summary.String, source: source.String,
+		}
 		requestedVersions := chunk.versionsByPackage[localPackageKey{ecosystem: eco, name: pkg}]
 		if len(requestedVersions) == 0 {
-			findings = append(findings, localMaliciousFinding(id, eco, pkg, "", referencesRaw.String, riskType, severity, summary.String, source.String))
+			findings = append(findings, localMaliciousFinding(row, ""))
 			continue
 		}
 
@@ -553,7 +580,7 @@ func (s *Store) findMaliciousBatchChunk(ctx context.Context, chunk localPackageP
 			if !affected {
 				continue
 			}
-			findings = append(findings, localMaliciousFinding(id, eco, pkg, version, referencesRaw.String, riskType, severity, summary.String, source.String))
+			findings = append(findings, localMaliciousFinding(row, version))
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -563,22 +590,35 @@ func (s *Store) findMaliciousBatchChunk(ctx context.Context, chunk localPackageP
 	return findings, nil
 }
 
-func localMaliciousFinding(id, ecosystem, name, version, referencesRaw, riskType, severity, summary, source string) domain.Finding {
-	title := summary
+// localMaliciousRow holds the malicious_local columns a finding is built from;
+// NULL text columns are read as "".
+type localMaliciousRow struct {
+	id            string
+	ecosystem     string
+	name          string
+	referencesRaw string
+	riskType      string
+	severity      string
+	summary       string
+	source        string
+}
+
+func localMaliciousFinding(row localMaliciousRow, version string) domain.Finding {
+	title := row.summary
 	if title == "" {
-		title = fmt.Sprintf("malicious package: %s (%s)", name, riskType)
+		title = fmt.Sprintf("malicious package: %s (%s)", row.name, row.riskType)
 	}
 	return domain.Finding{
-		Name:       name,
+		Name:       row.name,
 		Version:    version,
-		Ecosystem:  domain.Ecosystem(ecosystem),
-		Type:       db.FindingTypeForMaliciousRiskType(riskType),
-		Severity:   domain.Severity(severity),
-		AdvisoryID: id,
+		Ecosystem:  domain.Ecosystem(row.ecosystem),
+		Type:       db.FindingTypeForMaliciousRiskType(row.riskType),
+		Severity:   domain.Severity(row.severity),
+		AdvisoryID: row.id,
 		Title:      title,
-		URL:        firstURLFromJSON(referencesRaw),
-		RiskType:   riskType,
-		Source:     localFindingSource(source),
+		URL:        firstURLFromJSON(row.referencesRaw),
+		RiskType:   row.riskType,
+		Source:     localFindingSource(row.source),
 	}
 }
 

@@ -848,6 +848,11 @@ func tokenizeBatch(line string, depth *int) []scriptToken {
 		quoted = false
 		start = -1
 	}
+	// appendText adds line[at] to the current word as plain text.
+	appendText := func(at int) {
+		begin(at)
+		current.WriteByte(line[at])
+	}
 	inQuote := false  // inside a cmd.exe double quote
 	argQuote := false // inside a double quote as choco.exe splits its arguments
 	for i := 0; i < len(line); i++ {
@@ -861,8 +866,10 @@ func tokenizeBatch(line string, depth *int) []scriptToken {
 		case isBlank(ch) && !argQuote:
 			flush(i)
 		case inQuote || isBlank(ch):
-			begin(i)
-			current.WriteByte(ch)
+			// Quoted text and blanks inside an argument quote are plain text.
+			// This case must precede the special characters below, so it
+			// cannot merge with the default case.
+			appendText(i)
 		case ch == '^':
 			if i+1 >= len(line) {
 				continue
@@ -911,8 +918,7 @@ func tokenizeBatch(line string, depth *int) []scriptToken {
 			argQuote = false
 			emit(scriptToken{text: string(ch)})
 		default:
-			begin(i)
-			current.WriteByte(ch)
+			appendText(i)
 		}
 	}
 	flush(len(line))

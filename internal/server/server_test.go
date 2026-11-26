@@ -75,7 +75,7 @@ func TestNewWiresServersAndRoutes(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{Version: "v-new"}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Pinger: routePinger{}, Logger: logger, Build: BuildInfo{Version: "v-new"}})
 
 	if srv.main == nil || srv.metrics == nil || srv.health == nil {
 		t.Fatal("New did not initialize server components")
@@ -126,7 +126,7 @@ func TestNewWiresHTTPServerErrorLogsToConfiguredLogger(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
 
-	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Pinger: routePinger{}, Logger: logger})
 
 	for name, httpServer := range map[string]*http.Server{
 		"main":    srv.main,
@@ -172,7 +172,7 @@ func TestNewWiresMetricsSecurityHeaders(t *testing.T) {
 		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := New(ctx, cfg, metricsHeaderStore{}, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Store: metricsHeaderStore{}, Pinger: routePinger{}, Logger: logger})
 
 	rec := httptest.NewRecorder()
 	srv.metrics.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -221,7 +221,7 @@ func TestNewBindsLocalHTTPOverrideToLoopback(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{Version: "v-new"}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Pinger: routePinger{}, Logger: logger, Build: BuildInfo{Version: "v-new"}})
 	if srv.main.Addr != "127.0.0.1:8080" {
 		t.Fatalf("main addr = %q, want loopback bind", srv.main.Addr)
 	}
@@ -326,7 +326,7 @@ func TestRateLimitRunsBeforeAuthForInvalidAPIKeys(t *testing.T) {
 		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := New(ctx, cfg, store, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Store: store, Pinger: routePinger{}, Logger: logger})
 
 	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/check", nil)
 	req1.Header.Set("User-Agent", "packmon-cli/test")
@@ -381,7 +381,7 @@ func TestAuthenticatedRateLimitUsesAPIKeyAcrossClientIPs(t *testing.T) {
 		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := New(ctx, cfg, store, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Store: store, Pinger: routePinger{}, Logger: logger})
 
 	send := func(remoteAddr string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/check", strings.NewReader(`{"packages":[]}`))
@@ -427,7 +427,7 @@ func TestRunShutsDownOnContextCancel(t *testing.T) {
 		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Pinger: routePinger{}, Logger: logger})
 
 	go func() {
 		time.Sleep(50 * time.Millisecond)
@@ -469,7 +469,7 @@ func TestRunMetricsBindFailureKeepsMainServerAvailable(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Pinger: routePinger{}, Logger: logger})
 
 	runErr := make(chan error, 1)
 	go func() {
@@ -510,7 +510,7 @@ func TestRunFatalServerErrorMarksShuttingDown(t *testing.T) {
 		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Pinger: routePinger{}, Logger: logger})
 	srv.main.Addr = "127.0.0.1:bad-port"
 
 	if err := srv.Run(ctx); err == nil {
@@ -555,7 +555,7 @@ func TestRunTLSFatalLogRedactsCertificatePaths(t *testing.T) {
 	}
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
-	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Pinger: routePinger{}, Logger: logger})
 
 	err := srv.Run(ctx)
 	if err == nil {
@@ -719,7 +719,7 @@ func TestSetShuttingDownMakesReadyEndpointUnavailable(t *testing.T) {
 		FeedSync: config.FeedSyncConfig{Interval: time.Hour},
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	srv := New(ctx, cfg, nil, routePinger{}, logger, BuildInfo{}, nil, nil, nil)
+	srv := New(ctx, cfg, Dependencies{Pinger: routePinger{}, Logger: logger})
 
 	srv.SetShuttingDown()
 

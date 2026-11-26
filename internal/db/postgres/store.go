@@ -223,12 +223,12 @@ func normalizeRefreshQueuePriority(priority int) (int, error) {
 	return priority, nil
 }
 
-func clampLimit(limit, fallback, max int) int {
+func clampLimit(limit, fallback, maxLimit int) int {
 	if limit <= 0 {
 		limit = fallback
 	}
-	if limit > max {
-		return max
+	if limit > maxLimit {
+		return maxLimit
 	}
 	return limit
 }

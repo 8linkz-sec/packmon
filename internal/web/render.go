@@ -1405,19 +1405,19 @@ func statusClass(status string) string {
 	}
 }
 
-// truncate shortens a string to max characters, appending "..." if truncated.
-func truncate(s string, max int) string {
-	if max <= 0 {
+// truncate shortens a string to maxRunes characters, appending "..." if truncated.
+func truncate(s string, maxRunes int) string {
+	if maxRunes <= 0 {
 		return ""
 	}
 	runes := []rune(s)
-	if len(runes) <= max {
+	if len(runes) <= maxRunes {
 		return s
 	}
-	if max < 4 {
-		return string(runes[:max])
+	if maxRunes < 4 {
+		return string(runes[:maxRunes])
 	}
-	return string(runes[:max-3]) + "..."
+	return string(runes[:maxRunes-3]) + "..."
 }
 
 func findingTypeLabels(csv string) []string {

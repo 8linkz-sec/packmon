@@ -1,12 +1,14 @@
 package ci
 
 import (
+	"bytes"
 	"errors"
 	"go/parser"
 	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -803,27 +805,24 @@ func TestCLILocalDBCommandsDoNotQuerySQLiteSchema(t *testing.T) {
 func TestAdminHandlerUsesConsumerOwnedStoreInterface(t *testing.T) {
 	t.Parallel()
 
-	root := filepath.Join("..", "..")
-	checks := map[string][]string{
-		"internal/api/admin/handler.go": {
-			"store           db.Store",
-			"func NewAdminHandler(ctx context.Context, store db.Store",
-		},
-		"internal/api/admin/routes.go": {
-			"func RegisterRoutes(ctx context.Context, mux *http.ServeMux, store db.Store",
-		},
-	}
-	for rel, forbidden := range checks {
-		path := filepath.Join(root, filepath.FromSlash(rel))
+	// The admin handler and route wiring depend only on the consumer-owned admin
+	// store interfaces (adaptAdminStore in store_boundary.go narrows whatever
+	// arrives in Dependencies.Store). Neither file may name the monolithic
+	// db.Store at all: not as a field, an embedded field, or a parameter.
+	// store_boundary.go is out of scope because its adapter embeds db.Store.
+	monolithicStore := regexp.MustCompile(`\bdb\.Store\b`)
+	for _, rel := range []string{
+		"internal/api/admin/handler.go",
+		"internal/api/admin/routes.go",
+	} {
+		path := filepath.Join("..", "..", filepath.FromSlash(rel))
 		source, err := os.ReadFile(path) // #nosec G304 -- test reads fixed repository source from a static allowlist.
 		if err != nil {
 			t.Fatalf("read %s: %v", rel, err)
 		}
-		text := string(source)
-		for _, marker := range forbidden {
-			if strings.Contains(text, marker) {
-				t.Fatalf("%s still accepts monolithic db.Store via %q", rel, marker)
-			}
+		if loc := monolithicStore.FindIndex(source); loc != nil {
+			line := 1 + bytes.Count(source[:loc[0]], []byte("\n"))
+			t.Fatalf("%s:%d still depends on the monolithic db.Store; use the consumer-owned admin store interfaces", rel, line)
 		}
 	}
 }

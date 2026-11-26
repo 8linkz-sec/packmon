@@ -749,18 +749,7 @@ func (s *adminFlowStoreStub) PauseQueueJob(ctx context.Context, jobID int) error
 }
 
 func (s *adminFlowStoreStub) PauseQueueJobWithAudit(_ context.Context, jobID int, audit *db.AdminAuditEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	index, err := s.queueJobIndexLocked(jobID)
-	if err != nil {
-		return err
-	}
-	if err := s.insertAdminAuditLogLocked(audit); err != nil {
-		return err
-	}
-	s.queueJobs[index].Status = "paused"
-	s.queueJobs[index].Error = ""
-	return nil
+	return s.setQueueStatusWithAudit(jobID, "paused", audit)
 }
 
 func (s *adminFlowStoreStub) ResumeQueueJob(ctx context.Context, jobID int) error {
@@ -768,18 +757,7 @@ func (s *adminFlowStoreStub) ResumeQueueJob(ctx context.Context, jobID int) erro
 }
 
 func (s *adminFlowStoreStub) ResumeQueueJobWithAudit(_ context.Context, jobID int, audit *db.AdminAuditEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	index, err := s.queueJobIndexLocked(jobID)
-	if err != nil {
-		return err
-	}
-	if err := s.insertAdminAuditLogLocked(audit); err != nil {
-		return err
-	}
-	s.queueJobs[index].Status = "pending"
-	s.queueJobs[index].Error = ""
-	return nil
+	return s.setQueueStatusWithAudit(jobID, "pending", audit)
 }
 
 func (s *adminFlowStoreStub) RetryQueueJob(ctx context.Context, jobID int) error {
@@ -787,6 +765,12 @@ func (s *adminFlowStoreStub) RetryQueueJob(ctx context.Context, jobID int) error
 }
 
 func (s *adminFlowStoreStub) RetryQueueJobWithAudit(_ context.Context, jobID int, audit *db.AdminAuditEntry) error {
+	return s.setQueueStatusWithAudit(jobID, "pending", audit)
+}
+
+// setQueueStatusWithAudit records the audit entry and moves the job to
+// status in one locked step, as the audited store methods do atomically.
+func (s *adminFlowStoreStub) setQueueStatusWithAudit(jobID int, status string, audit *db.AdminAuditEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	index, err := s.queueJobIndexLocked(jobID)
@@ -796,7 +780,7 @@ func (s *adminFlowStoreStub) RetryQueueJobWithAudit(_ context.Context, jobID int
 	if err := s.insertAdminAuditLogLocked(audit); err != nil {
 		return err
 	}
-	s.queueJobs[index].Status = "pending"
+	s.queueJobs[index].Status = status
 	s.queueJobs[index].Error = ""
 	return nil
 }
@@ -907,7 +891,7 @@ func newAdminFlowHandler(t *testing.T, store *adminFlowStoreStub, cfg *config.Co
 	if len(syncFeed) > 0 {
 		syncFn = syncFeed[0]
 	}
-	handler := NewAdminHandler(ctx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, runtime, syncFn)
+	handler := NewAdminHandler(ctx, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), Dependencies{Store: store, Sessions: sm, Logger: logger, Config: cfg, Runtime: runtime, SyncFeed: syncFn})
 	handler.SetFeedConfigApplyFunc(func(context.Context, config.FeedSettings) error {
 		return nil
 	})
@@ -1520,7 +1504,7 @@ func TestRegisterRoutesRejectsUnknownAdminSubpaths(t *testing.T) {
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/not-a-real-page")
 	rec := httptest.NewRecorder()
@@ -3662,7 +3646,7 @@ func TestAdminScansRouteRendersScanHistory(t *testing.T) {
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/scans")
 	rec := httptest.NewRecorder()
@@ -3690,7 +3674,7 @@ func TestAdminNotFoundRendersStyledFallback(t *testing.T) {
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodGet, "/admin/missing-page")
 	rec := httptest.NewRecorder()
@@ -3726,7 +3710,7 @@ func TestAdminNotFoundKeepsMethodSpecificHandling(t *testing.T) {
 	runtime := config.NewRuntimeSettings(cfg.Server.BlockThreshold, cfg.Server.RateLimitPerMinute, cfg.Server.RateLimitBurst)
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	mux := http.NewServeMux()
-	RegisterRoutes(ctx, mux, store, sm, slog.New(slog.NewTextHandler(io.Discard, nil)), cfg, runtime, nil, nil, nil)
+	RegisterRoutes(ctx, mux, Dependencies{Store: store, Sessions: sm, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), Config: cfg, Runtime: runtime})
 
 	req, _ := authenticatedAdminRequest(t, sm, http.MethodPost, "/admin/missing-page")
 	rec := httptest.NewRecorder()

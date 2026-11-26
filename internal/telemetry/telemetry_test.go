@@ -187,29 +187,6 @@ func TestWriteMetricsDelegatesToMetricGroupWriters(t *testing.T) {
 	}
 }
 
-func writeTestMetrics(
-	w *bufio.Writer,
-	counters CounterSnapshot,
-	statuses []db.FeedSyncStatus,
-	jobs []db.RefreshJob,
-	queueStats *db.QueueStatsResult,
-	dashboardStats *db.DashboardStatsResult,
-	scanTotals *db.ScanTotals,
-	dbPoolStats *db.DBPoolStats,
-	schemaVersion uint,
-) {
-	writeMetrics(w, metricsRenderSnapshot{
-		Counters:       counters,
-		Statuses:       statuses,
-		Jobs:           jobs,
-		QueueStats:     queueStats,
-		DashboardStats: dashboardStats,
-		ScanTotals:     scanTotals,
-		DBPoolStats:    dbPoolStats,
-		SchemaVersion:  schemaVersion,
-	})
-}
-
 func TestRegistryQueueJobsCompletedCounterUsesSourceAndResult(t *testing.T) {
 	registry := NewRegistry()
 
@@ -236,17 +213,20 @@ func TestRegistryQueueJobsCompletedCounterUsesSourceAndResult(t *testing.T) {
 func TestWriteHTTPMetricsIncludesDurationHistogramBuckets(t *testing.T) {
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, CounterSnapshot{
-		HTTPRequests: map[httpMetricKey]httpMetricSnapshot{
-			{Method: http.MethodPost, Route: "POST /api/v1/check", Status: "200"}: {
-				Count:         2,
-				DurationNanos: 300_000_000,
-				DurationBuckets: []uint64{
-					1, 2, 2, 2, 2, 2, 2,
+	writeMetrics(writer, metricsRenderSnapshot{
+		Counters: CounterSnapshot{
+			HTTPRequests: map[httpMetricKey]httpMetricSnapshot{
+				{Method: http.MethodPost, Route: "POST /api/v1/check", Status: "200"}: {
+					Count:         2,
+					DurationNanos: 300_000_000,
+					DurationBuckets: []uint64{
+						1, 2, 2, 2, 2, 2, 2,
+					},
 				},
 			},
 		},
-	}, nil, nil, nil, nil, nil, nil, 1)
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -322,51 +302,59 @@ func TestMetricsHandlerExportsStoreReadFailureCounter(t *testing.T) {
 func TestWriteMetricsOutputRegression(t *testing.T) {
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, CounterSnapshot{
-		AuthLoginFailures:   2,
-		DegradedResponses:   3,
-		QueueStuckRecovered: 4,
-		FeedSyncTimeouts:    map[string]uint64{`feed\quoted`: 5},
-		QueueErrors:         map[string]uint64{`socket"dev`: 6},
-		QueueJobsCompleted: map[QueueJobCompletedKey]uint64{
-			{Source: `reversing\labs`, Result: QueueJobResultError}: 8,
-			{Source: `socket"dev`, Result: QueueJobResultSuccess}:   7,
-		},
-		HTTPRequests: map[httpMetricKey]httpMetricSnapshot{
-			{Method: http.MethodGet, Route: `GET /api/"quote"`, Status: "200"}: {
-				Count:         7,
-				DurationNanos: 2_500_000_000,
+	writeMetrics(writer, metricsRenderSnapshot{
+		Counters: CounterSnapshot{
+			AuthLoginFailures:   2,
+			DegradedResponses:   3,
+			QueueStuckRecovered: 4,
+			FeedSyncTimeouts:    map[string]uint64{`feed\quoted`: 5},
+			QueueErrors:         map[string]uint64{`socket"dev`: 6},
+			QueueJobsCompleted: map[QueueJobCompletedKey]uint64{
+				{Source: `reversing\labs`, Result: QueueJobResultError}: 8,
+				{Source: `socket"dev`, Result: QueueJobResultSuccess}:   7,
+			},
+			HTTPRequests: map[httpMetricKey]httpMetricSnapshot{
+				{Method: http.MethodGet, Route: `GET /api/"quote"`, Status: "200"}: {
+					Count:         7,
+					DurationNanos: 2_500_000_000,
+				},
 			},
 		},
-	}, []db.FeedSyncStatus{
-		{FeedName: `feed\quoted`, LastSyncStatus: db.FeedSyncStatusRunning},
-	}, nil, &db.QueueStatsResult{
-		Pending:    1,
-		Processing: 2,
-		Done:       3,
-		Error:      4,
-		Paused:     5,
-	}, &db.DashboardStatsResult{
-		TotalPackages:        10,
-		TotalVulnerabilities: 11,
-		TotalMalicious:       12,
-		TotalSupplyChainRisk: 13,
-		TotalLifecycle:       14,
-		BySeverity:           map[string]int{"LOW": 15},
-	}, &db.ScanTotals{
-		PackagesScanned: 16,
-		Findings:        17,
-	}, &db.DBPoolStats{
-		MaxConns:          18,
-		AcquiredConns:     19,
-		IdleConns:         20,
-		ConstructingConns: 21,
-		AcquireCount:      22,
-		AcquireDuration:   1500 * time.Millisecond,
-		CanceledAcquires:  23,
-		EmptyAcquires:     24,
-		EmptyAcquireWait:  250 * time.Millisecond,
-	}, 25)
+		Statuses: []db.FeedSyncStatus{
+			{FeedName: `feed\quoted`, LastSyncStatus: db.FeedSyncStatusRunning},
+		},
+		QueueStats: &db.QueueStatsResult{
+			Pending:    1,
+			Processing: 2,
+			Done:       3,
+			Error:      4,
+			Paused:     5,
+		},
+		DashboardStats: &db.DashboardStatsResult{
+			TotalPackages:        10,
+			TotalVulnerabilities: 11,
+			TotalMalicious:       12,
+			TotalSupplyChainRisk: 13,
+			TotalLifecycle:       14,
+			BySeverity:           map[string]int{"LOW": 15},
+		},
+		ScanTotals: &db.ScanTotals{
+			PackagesScanned: 16,
+			Findings:        17,
+		},
+		DBPoolStats: &db.DBPoolStats{
+			MaxConns:          18,
+			AcquiredConns:     19,
+			IdleConns:         20,
+			ConstructingConns: 21,
+			AcquireCount:      22,
+			AcquireDuration:   1500 * time.Millisecond,
+			CanceledAcquires:  23,
+			EmptyAcquires:     24,
+			EmptyAcquireWait:  250 * time.Millisecond,
+		},
+		SchemaVersion: 25,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -504,18 +492,21 @@ func TestWriteMetricsIncludesFeedSyncDurationByFeedAndStatus(t *testing.T) {
 
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, CounterSnapshot{}, []db.FeedSyncStatus{
-		{
-			FeedName:         `osv"primary`,
-			LastSyncStatus:   db.FeedSyncStatusSuccess,
-			LastSyncDuration: &duration,
+	writeMetrics(writer, metricsRenderSnapshot{
+		Statuses: []db.FeedSyncStatus{
+			{
+				FeedName:         `osv"primary`,
+				LastSyncStatus:   db.FeedSyncStatusSuccess,
+				LastSyncDuration: &duration,
+			},
+			{
+				FeedName:         "ignored",
+				LastSyncStatus:   `bad"status`,
+				LastSyncDuration: &invalidDuration,
+			},
 		},
-		{
-			FeedName:         "ignored",
-			LastSyncStatus:   `bad"status`,
-			LastSyncDuration: &invalidDuration,
-		},
-	}, nil, nil, nil, nil, nil, 1)
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -632,45 +623,54 @@ func TestWriteMetricsIncludesCorePhaseFiveSeries(t *testing.T) {
 
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, registry.Snapshot(), []db.FeedSyncStatus{
-		{
-			FeedName:       "osv",
-			LastSyncAt:     ptrTime(now.Add(-2 * time.Hour)),
-			LastSyncStatus: "success",
+	writeMetrics(writer, metricsRenderSnapshot{
+		Counters: registry.Snapshot(),
+		Statuses: []db.FeedSyncStatus{
+			{
+				FeedName:       "osv",
+				LastSyncAt:     ptrTime(now.Add(-2 * time.Hour)),
+				LastSyncStatus: "success",
+			},
 		},
-	}, []db.RefreshJob{
-		{
-			Source:      "socket",
-			Status:      "pending",
-			RequestedAt: now.Add(-30 * time.Minute),
+		Jobs: []db.RefreshJob{
+			{
+				Source:      "socket",
+				Status:      "pending",
+				RequestedAt: now.Add(-30 * time.Minute),
+			},
 		},
-	}, &db.QueueStatsResult{
-		Pending:    3,
-		Processing: 1,
-		Done:       5,
-		Error:      2,
-		Paused:     4,
-	}, &db.DashboardStatsResult{
-		TotalPackages:        11,
-		TotalVulnerabilities: 7,
-		TotalMalicious:       2,
-		TotalSupplyChainRisk: 5,
-		TotalLifecycle:       3,
-		BySeverity:           map[string]int{"HIGH": 3},
-	}, &db.ScanTotals{
-		PackagesScanned: 21,
-		Findings:        9,
-	}, &db.DBPoolStats{
-		MaxConns:          20,
-		AcquiredConns:     2,
-		IdleConns:         6,
-		ConstructingConns: 1,
-		AcquireCount:      31,
-		AcquireDuration:   2 * time.Second,
-		CanceledAcquires:  4,
-		EmptyAcquires:     5,
-		EmptyAcquireWait:  750 * time.Millisecond,
-	}, 1)
+		QueueStats: &db.QueueStatsResult{
+			Pending:    3,
+			Processing: 1,
+			Done:       5,
+			Error:      2,
+			Paused:     4,
+		},
+		DashboardStats: &db.DashboardStatsResult{
+			TotalPackages:        11,
+			TotalVulnerabilities: 7,
+			TotalMalicious:       2,
+			TotalSupplyChainRisk: 5,
+			TotalLifecycle:       3,
+			BySeverity:           map[string]int{"HIGH": 3},
+		},
+		ScanTotals: &db.ScanTotals{
+			PackagesScanned: 21,
+			Findings:        9,
+		},
+		DBPoolStats: &db.DBPoolStats{
+			MaxConns:          20,
+			AcquiredConns:     2,
+			IdleConns:         6,
+			ConstructingConns: 1,
+			AcquireCount:      31,
+			AcquireDuration:   2 * time.Second,
+			CanceledAcquires:  4,
+			EmptyAcquires:     5,
+			EmptyAcquireWait:  750 * time.Millisecond,
+		},
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -719,11 +719,14 @@ func TestWriteMetricsIncludesCorePhaseFiveSeries(t *testing.T) {
 func TestWriteMetricsIncludesFeedSyncStatusGauges(t *testing.T) {
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, CounterSnapshot{}, []db.FeedSyncStatus{
-		{FeedName: "osv", LastSyncStatus: db.FeedSyncStatusSuccess},
-		{FeedName: "nvd", LastSyncStatus: db.FeedSyncStatusError},
-		{FeedName: "ignored", LastSyncStatus: "failed"},
-	}, nil, nil, nil, nil, nil, 1)
+	writeMetrics(writer, metricsRenderSnapshot{
+		Statuses: []db.FeedSyncStatus{
+			{FeedName: "osv", LastSyncStatus: db.FeedSyncStatusSuccess},
+			{FeedName: "nvd", LastSyncStatus: db.FeedSyncStatusError},
+			{FeedName: "ignored", LastSyncStatus: "failed"},
+		},
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -747,16 +750,19 @@ func TestWriteMetricsIncludesFeedSyncStatusGauges(t *testing.T) {
 func TestWriteMetricsClampsFindingSeverityLabels(t *testing.T) {
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, CounterSnapshot{}, nil, nil, nil, &db.DashboardStatsResult{
-		BySeverity: map[string]int{
-			"HIGH":         3,
-			" high ":       2,
-			"UNKNOWN":      1,
-			`HI"GH`:        4,
-			"critical-ish": 5,
-			"NONE":         6,
+	writeMetrics(writer, metricsRenderSnapshot{
+		DashboardStats: &db.DashboardStatsResult{
+			BySeverity: map[string]int{
+				"HIGH":         3,
+				" high ":       2,
+				"UNKNOWN":      1,
+				`HI"GH`:        4,
+				"critical-ish": 5,
+				"NONE":         6,
+			},
 		},
-	}, nil, nil, 1)
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -792,7 +798,10 @@ func TestHTTPMiddlewareRecordsRequestCountAndDuration(t *testing.T) {
 
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, registry.Snapshot(), nil, nil, nil, nil, nil, nil, 1)
+	writeMetrics(writer, metricsRenderSnapshot{
+		Counters:      registry.Snapshot(),
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -815,16 +824,19 @@ func TestWriteMetricsSeparatesFeedAttemptTimestampFromDataAge(t *testing.T) {
 
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, CounterSnapshot{}, []db.FeedSyncStatus{
-		{
-			FeedName:       "osv",
-			LastSyncAt:     &lastSuccessfulSync,
-			LastSyncStatus: "running",
-			EntriesSynced:  10,
-			EntriesTotal:   10,
-			UpdatedAt:      lastAttempt,
+	writeMetrics(writer, metricsRenderSnapshot{
+		Statuses: []db.FeedSyncStatus{
+			{
+				FeedName:       "osv",
+				LastSyncAt:     &lastSuccessfulSync,
+				LastSyncStatus: "running",
+				EntriesSynced:  10,
+				EntriesTotal:   10,
+				UpdatedAt:      lastAttempt,
+			},
 		},
-	}, nil, nil, nil, nil, nil, 1)
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -856,7 +868,10 @@ func TestHTTPMiddlewareBucketsUnmatchedRoutes(t *testing.T) {
 
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, registry.Snapshot(), nil, nil, nil, nil, nil, nil, 1)
+	writeMetrics(writer, metricsRenderSnapshot{
+		Counters:      registry.Snapshot(),
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}
@@ -884,7 +899,10 @@ func TestHTTPMiddlewareBucketsUnknownMethods(t *testing.T) {
 
 	var builder strings.Builder
 	writer := bufio.NewWriter(&builder)
-	writeTestMetrics(writer, registry.Snapshot(), nil, nil, nil, nil, nil, nil, 1)
+	writeMetrics(writer, metricsRenderSnapshot{
+		Counters:      registry.Snapshot(),
+		SchemaVersion: 1,
+	})
 	if err := writer.Flush(); err != nil {
 		t.Fatalf("Flush() error = %v", err)
 	}

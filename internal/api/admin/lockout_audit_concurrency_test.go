@@ -115,7 +115,7 @@ func runLockoutAuditRace(t *testing.T, request lockedOutAdminRequest, failFirst 
 		cfg := adminFlowConfig()
 		sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-		h := NewAdminHandler(ctx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, nil, nil)
+		h := NewAdminHandler(ctx, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), Dependencies{Store: store, Sessions: sm, Logger: logger, Config: cfg})
 
 		h.loginMu.Lock()
 		h.loginAttempts[lockoutTestIP] = &loginAttempt{count: loginMaxAttempts, lockedAt: time.Now()}

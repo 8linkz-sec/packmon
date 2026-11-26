@@ -798,34 +798,32 @@ func f068RegisteredMux(t *testing.T, store *adminFlowStoreStub, cfg *config.Conf
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	runtime := config.NewRuntimeSettingsFromConfig(cfg)
 	mux := http.NewServeMux()
-	RegisterRoutes(
-		ctx,
-		mux,
-		store,
-		sm,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		cfg,
-		runtime,
-		func(context.Context, string) error {
+	RegisterRoutes(ctx, mux, Dependencies{
+		Store:    store,
+		Sessions: sm,
+		Logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Config:   cfg,
+		Runtime:  runtime,
+		SyncFeed: func(context.Context, string) error {
 			callbacks.mu.Lock()
 			callbacks.sync++
 			callbacks.mu.Unlock()
 			return nil
 		},
-		func(context.Context, config.FeedSettings) error {
+		ApplyFeedConfig: func(context.Context, config.FeedSettings) error {
 			callbacks.mu.Lock()
 			callbacks.apply++
 			callbacks.mu.Unlock()
 			return nil
 		},
-		func(_ context.Context, feedName string) (config.FeedSettings, bool, error) {
+		ResetFeedConfig: func(_ context.Context, feedName string) (config.FeedSettings, bool, error) {
 			callbacks.mu.Lock()
 			callbacks.reset++
 			callbacks.mu.Unlock()
 			feed, ok := cfg.FeedSettings(feedName)
 			return feed, ok, nil
 		},
-	)
+	})
 	return mux, sm, cancel
 }
 

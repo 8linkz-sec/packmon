@@ -44,17 +44,12 @@ func TestPostgresBackedPackageAPIAndWebRoutes(t *testing.T) {
 	const apiToken = "packmon-postgres-routes-token" // #nosec G101 -- test fixture for an ephemeral Docker database.
 	seedPostgresRoutesFixtures(t, ctx, store, apiToken)
 
-	srv := New(
-		ctx,
-		postgresRoutesServerConfig(),
-		store,
-		store,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
-		BuildInfo{Version: "test", Commit: "test", Date: "test", SchemaVersion: migrations.ExpectedVersion},
-		nil,
-		nil,
-		nil,
-	)
+	srv := New(ctx, postgresRoutesServerConfig(), Dependencies{
+		Store:  store,
+		Pinger: store,
+		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Build:  BuildInfo{Version: "test", Commit: "test", Date: "test", SchemaVersion: migrations.ExpectedVersion},
+	})
 	handler := srv.main.Handler
 
 	apiDetail := servePostgresRoutesRequest(t, handler, http.MethodGet, "/api/v1/packages/npm/left-pad-vuln-a?version=2.0.0", apiToken, nil)

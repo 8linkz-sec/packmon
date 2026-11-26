@@ -78,7 +78,7 @@ func newFeedConfigRuntimeHandler(t *testing.T, ctx context.Context, store *feedC
 	}
 	sm := auth.NewSessionManagerWithIdleTimeout(ctx, time.Hour, auth.DefaultAdminIdleTimeout, false)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	h := NewAdminHandler(ctx, store, sm, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), logger, cfg, nil, nil)
+	h := NewAdminHandler(ctx, web.NewRendererWithLayoutLinks(web.TemplateFS(), false, web.LayoutLinks{}), Dependencies{Store: store, Sessions: sm, Logger: logger, Config: cfg})
 	h.SetFeedConfigApplyFunc(func(_ context.Context, feed config.FeedSettings) error {
 		if feed.SyncInterval == requestBSaveInterval {
 			store.park(store.applyGate)
