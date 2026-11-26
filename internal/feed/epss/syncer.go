@@ -291,7 +291,10 @@ func (s *Syncer) openScores(ctx context.Context, validators epssMetadata) (io.Re
 
 	if resp.StatusCode == http.StatusNotModified {
 		closeBody()
-		return nil, func() {}, metadata, true, nil
+		return nil, func() {
+			// The 304 body is already closed and there is no payload to
+			// release.
+		}, metadata, true, nil
 	}
 
 	if resp.StatusCode != http.StatusOK {

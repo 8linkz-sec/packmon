@@ -33,10 +33,23 @@ func MetricsRecorderOrNoop(recorder MetricsRecorder) MetricsRecorder {
 	return recorder
 }
 
-func (noopMetricsRecorder) AddQueueStuckRecovered(int) {}
-func (noopMetricsRecorder) IncFeedSyncTimeout(string)  {}
-func (noopMetricsRecorder) IncQueueError(string)       {}
+// The noopMetricsRecorder methods deliberately discard every observation: the
+// recorder stands in when a caller wires no metrics registry.
+
+func (noopMetricsRecorder) AddQueueStuckRecovered(int) {
+	// Intentionally empty: no registry is wired.
+}
+
+func (noopMetricsRecorder) IncFeedSyncTimeout(string) {
+	// Intentionally empty: no registry is wired.
+}
+
+func (noopMetricsRecorder) IncQueueError(string) {
+	// Intentionally empty: no registry is wired.
+}
+
 func (noopMetricsRecorder) IncQueueJobCompleted(string, string) {
+	// Intentionally empty: no registry is wired.
 }
 
 type metricsRecorderOption struct {

@@ -67,7 +67,10 @@ func migrationConnConfig(dsn string) (*pgx.ConnConfig, error) {
 // connectAndLockMigrations opens the migration connection and takes the
 // migration advisory lock, both bounded by setupTimeout when it is positive.
 func connectAndLockMigrations(ctx context.Context, db *sql.DB, setupTimeout time.Duration) (*sql.Conn, error) {
-	setupCtx, cancel := ctx, context.CancelFunc(func() {})
+	setupCtx, cancel := ctx, context.CancelFunc(func() {
+		// Without a setup timeout the caller's context is used as is and
+		// the caller owns its cancellation.
+	})
 	if setupTimeout > 0 {
 		setupCtx, cancel = context.WithTimeout(ctx, setupTimeout)
 	}

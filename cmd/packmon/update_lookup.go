@@ -1669,7 +1669,10 @@ func isSafeGitRemote(remote string) bool {
 // phase per-request timeout unless the caller already carries a deadline.
 func perRequestLookupContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
+		return ctx, func() {
+			// The caller's deadline already bounds the lookup and the caller
+			// owns that context, so there is nothing to cancel here.
+		}
 	}
 	return context.WithTimeout(ctx, registryLookupPhaseFrom(ctx).perRequestTimeout())
 }

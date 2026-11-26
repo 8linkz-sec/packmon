@@ -144,7 +144,10 @@ func skipSQLiteMigrationLock(dbPath string) bool {
 
 func acquireSQLiteSyncLock(ctx context.Context, dbPath string) (func(), error) {
 	if skipSQLiteSyncLock(dbPath) {
-		return func() {}, nil
+		return func() {
+			// No lock file was taken for this database, so there is
+			// nothing to release.
+		}, nil
 	}
 	return acquireSQLiteLockFile(ctx, dbPath+".sync.lock", sqliteSyncLockTimeout, "sync")
 }
