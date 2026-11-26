@@ -6,8 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"testing"
 	"time"
 
@@ -21,17 +23,21 @@ import (
 func startPostgresStore(t *testing.T) *postgres.Store {
 	t.Helper()
 
-	if _, err := exec.LookPath("docker"); err != nil {
-		t.Fatalf("docker not available; tagged integration tests require Docker: %v", err)
+	dbHost, dbPort := "127.0.0.1", 0
+	if serviceDSN, ok := serviceTestPostgresDSN(t, testPostgresURLEnv); ok {
+		dbHost, dbPort = serviceTestPostgresHostPort(t, serviceDSN)
+	} else {
+		if _, err := exec.LookPath("docker"); err != nil {
+			t.Fatalf("docker not available; tagged integration tests require Docker: %v", err)
+		}
+		_, dbPort = startIntegrationPostgres(t, "packmon-store-it")
 	}
-
-	_, dbPort := startIntegrationPostgres(t, "packmon-store-it")
 
 	env := []string{
 		"PACKMON_SERVER_MODE=production",
 		"PACKMON_LOG_LEVEL=warn",
 		"PACKMON_LOG_FORMAT=console",
-		"PACKMON_DB_HOST=127.0.0.1",
+		"PACKMON_DB_HOST=" + dbHost,
 		fmt.Sprintf("PACKMON_DB_PORT=%d", dbPort),
 		"PACKMON_DB_NAME=packmon",
 		"PACKMON_DB_USER=packmon",
@@ -47,7 +53,7 @@ func startPostgresStore(t *testing.T) *postgres.Store {
 	}
 	runMigrateWithRetry(t, serverBinaryPath(t), env)
 
-	dsn := fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", dbPort)
+	dsn := fmt.Sprintf("postgres://packmon:packmon@%s/packmon?sslmode=disable", net.JoinHostPort(dbHost, strconv.Itoa(dbPort)))
 	store, err := postgres.New(context.Background(), dsn, nil, nil)
 	if err != nil {
 		t.Fatalf("connect store: %v", err)

@@ -28,6 +28,38 @@ const postgresDockerTestImage = "cgr.dev/chainguard/postgres:18@sha256:f4b066118
 func startDockerPostgresStore(t *testing.T) (*Store, string) {
 	t.Helper()
 
+	dsn, ok := serviceTestPostgresDSN(t, testPostgresURLEnv)
+	if !ok {
+		dsn = startDockerPostgres(t)
+	}
+	waitForPostgresDSN(t, dsn)
+	if err := migrations.Run(dsn); err != nil {
+		t.Fatalf("migrations.Run() error = %v", err)
+	}
+	version, dirty, err := migrations.Version(dsn)
+	if err != nil {
+		t.Fatalf("migrations.Version() error = %v", err)
+	}
+	if dirty || version != migrations.ExpectedVersion {
+		t.Fatalf("schema version = %d dirty=%v, want %d clean", version, dirty, migrations.ExpectedVersion)
+	}
+
+	store, err := New(context.Background(), dsn, nil, &PoolConfig{MaxConns: 2, MinConns: 1})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	})
+	return store, dsn
+}
+
+// startDockerPostgres starts a throwaway PostgreSQL container and returns its DSN.
+func startDockerPostgres(t *testing.T) string {
+	t.Helper()
+
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Fatalf("docker not available; Docker-backed PostgreSQL tests require the explicit integration gate to run against Docker: %v", err)
 	}
@@ -59,29 +91,7 @@ func startDockerPostgresStore(t *testing.T) (*Store, string) {
 	waitForPostgresContainer(t, containerName)
 
 	port := dockerPostgresPublishedPort(t, containerName, "5432/tcp")
-	dsn := fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
-	waitForPostgresDSN(t, dsn)
-	if err := migrations.Run(dsn); err != nil {
-		t.Fatalf("migrations.Run() error = %v", err)
-	}
-	version, dirty, err := migrations.Version(dsn)
-	if err != nil {
-		t.Fatalf("migrations.Version() error = %v", err)
-	}
-	if dirty || version != migrations.ExpectedVersion {
-		t.Fatalf("schema version = %d dirty=%v, want %d clean", version, dirty, migrations.ExpectedVersion)
-	}
-
-	store, err := New(context.Background(), dsn, nil, &PoolConfig{MaxConns: 2, MinConns: 1})
-	if err != nil {
-		t.Fatalf("New() error = %v", err)
-	}
-	t.Cleanup(func() {
-		if err := store.Close(); err != nil {
-			t.Fatalf("Close() error = %v", err)
-		}
-	})
-	return store, dsn
+	return fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
 }
 
 func dockerPostgresPublishedPort(t *testing.T, containerName, containerPort string) int {

@@ -104,6 +104,34 @@ func TestPostgresBackedPackageAPIAndWebRoutes(t *testing.T) {
 func startPostgresRoutesStore(t *testing.T, ctx context.Context) *postgres.Store {
 	t.Helper()
 
+	dsn, ok := serviceTestPostgresDSN(t, testPostgresURLEnv)
+	if !ok {
+		dsn = startPostgresRoutesContainer(t)
+	}
+	waitForPostgresRoutesDSN(t, dsn)
+
+	if err := migrations.Run(dsn); err != nil {
+		t.Fatalf("migrations.Run() error = %v", err)
+	}
+	version, dirty, err := migrations.Version(dsn)
+	if err != nil {
+		t.Fatalf("migrations.Version() error = %v", err)
+	}
+	if dirty || version != migrations.ExpectedVersion {
+		t.Fatalf("schema version = %d dirty=%v, want %d clean", version, dirty, migrations.ExpectedVersion)
+	}
+
+	store, err := postgres.New(ctx, dsn, nil, &postgres.PoolConfig{MaxConns: 4, MinConns: 1, ConnectTimeout: time.Second})
+	if err != nil {
+		t.Fatalf("postgres.New() error = %v", err)
+	}
+	return store
+}
+
+// startPostgresRoutesContainer starts a throwaway PostgreSQL container and returns its DSN.
+func startPostgresRoutesContainer(t *testing.T) string {
+	t.Helper()
+
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Fatalf("docker not available; tagged integration test requires Docker-backed PostgreSQL: %v", err)
 	}
@@ -131,25 +159,7 @@ func startPostgresRoutesStore(t *testing.T, ctx context.Context) *postgres.Store
 
 	waitForPostgresRoutesContainer(t, containerName)
 	port := dockerRoutesPublishedPort(t, containerName, "5432/tcp")
-	dsn := fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
-	waitForPostgresRoutesDSN(t, dsn)
-
-	if err := migrations.Run(dsn); err != nil {
-		t.Fatalf("migrations.Run() error = %v", err)
-	}
-	version, dirty, err := migrations.Version(dsn)
-	if err != nil {
-		t.Fatalf("migrations.Version() error = %v", err)
-	}
-	if dirty || version != migrations.ExpectedVersion {
-		t.Fatalf("schema version = %d dirty=%v, want %d clean", version, dirty, migrations.ExpectedVersion)
-	}
-
-	store, err := postgres.New(ctx, dsn, nil, &postgres.PoolConfig{MaxConns: 4, MinConns: 1, ConnectTimeout: time.Second})
-	if err != nil {
-		t.Fatalf("postgres.New() error = %v", err)
-	}
-	return store
+	return fmt.Sprintf("postgres://packmon:packmon@127.0.0.1:%d/packmon?sslmode=disable", port)
 }
 
 func seedPostgresRoutesFixtures(t *testing.T, ctx context.Context, store *postgres.Store, token string) {

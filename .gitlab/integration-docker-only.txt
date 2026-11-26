@@ -1,0 +1,14 @@
+# Integration tests the GitLab go-test-integration job skips (go test -skip): they need a Docker daemon, which the
+# runners do not have (no docker.sock, unprivileged). `make test-integration` still runs them on a host with
+# Docker. Format: one top-level test per line, "TestName  # reason"; tests/ci checks that every entry names
+# exactly one integration test. Remove an entry as soon as its test can run against the job's PostgreSQL services.
+TestComposeRuntimeContracts  # docker compose up of the shipped stack as a non-root user
+TestDockerRuntimeArtifacts  # docker build of the server and cli images
+TestN8NCommandRuntimeDockerContract  # runs the n8n command nodes in containers
+TestN8NWeeklyMetricsRuntime  # runs the n8n weekly metrics workflow in containers
+TestN8NOnDemandWebhookRuntime  # runs the n8n on-demand webhook workflow in containers
+TestProductionServerWithPostgresAndAPIKey  # seeds and asserts through docker exec psql in its own container
+TestProductionAdminRoutesExerciseCriticalWorkflows  # asserts through docker exec psql in its own container
+TestProductionServerRefusesUnmigratedPostgres  # asserts through docker exec psql in its own container
+TestPGStatStatementsPreflightFailureStaysCleanAndCanRetry  # ALTER SYSTEM and docker restart of its own server
+TestSyncXIDWindowsAgainstPastEpochPostgres  # starts its own server at a chosen transaction-ID epoch
