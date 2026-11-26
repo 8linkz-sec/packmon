@@ -6,8 +6,9 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
-// Lowercase ecosystem keys shared by the OSV, GHSA and OpenSSF mappings;
-// cratesIOKey is also the OSV bucket directory name.
+// Lowercase ecosystem lookup keys shared by the OSV, GHSA and OpenSSF
+// mappings. OSVBucketEcosystems spells its case-sensitive bucket directory
+// names separately.
 const (
 	cratesIOKey      = "crates.io"
 	githubActionsKey = "github actions"
@@ -115,7 +116,7 @@ func OSVBucketEcosystems() []string {
 		"PyPI",
 		"Go",
 		"Maven",
-		cratesIOKey,
+		"crates.io",
 		"NuGet",
 		"Packagist",
 		"RubyGems",

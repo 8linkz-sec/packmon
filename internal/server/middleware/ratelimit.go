@@ -37,7 +37,7 @@ type bucket struct {
 
 const (
 	rateLimiterShardCount = 64
-	// rateLimitExceededMessage is the 429 response text and its debug log message.
+	// rateLimitExceededMessage is the JSON error text of a 429 response.
 	rateLimitExceededMessage = "rate limit exceeded"
 )
 
@@ -187,7 +187,7 @@ func rateLimitMiddleware(rl *rateLimiter, logger *slog.Logger) func(http.Handler
 			}
 			ip := clientIP(r)
 			if !rl.allow(ip) {
-				logger.Debug(rateLimitExceededMessage,
+				logger.Debug("rate limit exceeded",
 					slog.String("client_ip", ip),
 					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
 					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),

@@ -30,11 +30,11 @@ const (
 	// DefaultAdminIdleTimeout is the server-side inactivity timeout used when
 	// PACKMON_ADMIN_IDLE_TIMEOUT is not set.
 	DefaultAdminIdleTimeout = 15 * time.Minute
-
-	// defaultMetricsHost is the metrics listen host when PACKMON_METRICS_HOST
-	// is unset or blank.
-	defaultMetricsHost = "127.0.0.1"
 )
+
+// defaultMetricsHost is the metrics listen host when PACKMON_METRICS_HOST is
+// unset or blank.
+const defaultMetricsHost = "127.0.0.1"
 
 // ScanLogIdentityMode controls which identity-adjacent fields are retained in
 // server-side scan_log rows.
