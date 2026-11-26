@@ -187,7 +187,7 @@ func TestAdminFeedsSaveAndResetFormsUseSubmitLocks(t *testing.T) {
 				`data-submit-lock`,
 				`data-submit-lock-label="Saving feed settings"`,
 				`data-submit-lock-button`,
-				`aria-label="Save VulnCheck feed settings"`,
+				`aria-label='Save VulnCheck feed settings'`,
 			},
 		},
 		{
@@ -197,7 +197,7 @@ func TestAdminFeedsSaveAndResetFormsUseSubmitLocks(t *testing.T) {
 				`data-submit-lock`,
 				`data-submit-lock-label="Resetting feed settings"`,
 				`data-submit-lock-button`,
-				`aria-label="Reset VulnCheck feed settings"`,
+				`aria-label='Reset VulnCheck feed settings'`,
 			},
 		},
 	} {
@@ -1087,7 +1087,7 @@ func TestAdminKeysPageRendersNewKeyAsKeyboardCopyableControl(t *testing.T) {
 	}
 	for _, want := range []string{
 		`type="button"`,
-		`aria-label="Copy API key"`,
+		`aria-label='Copy API key'`,
 		`data-copy-target="#new-api-key"`,
 	} {
 		if !strings.Contains(body, want) {
@@ -1199,7 +1199,7 @@ func TestAdminInteractiveRowControlsHaveAccessibleNamesAndTouchTargets(t *testin
 			target: "/admin/advisories",
 			call:   handler.HandleAdminAdvisories,
 			want: []string{
-				`aria-label="Edit manual advisory manual:vuln for npm/left-pad"`,
+				`aria-label='Edit manual advisory manual:vuln for npm/left-pad'`,
 				`aria-label="Delete manual advisory manual:vuln for npm/left-pad"`,
 				`min-h-11`,
 				`px-3 py-2`,
@@ -1281,9 +1281,9 @@ func TestAdminFeedAndQueueControlsHaveProgrammaticLabels(t *testing.T) {
 				`confirm_clear_api_key`,
 				`confirm_reset`,
 				`Saving an environment-provided key stores it with this database override.`,
-				`aria-label="Save VulnCheck feed settings"`,
-				`aria-label="Sync VulnCheck now"`,
-				`aria-label="Reset VulnCheck feed settings"`,
+				`aria-label='Save VulnCheck feed settings'`,
+				`aria-label='Sync now (VulnCheck feed)'`,
+				`aria-label='Reset VulnCheck feed settings'`,
 			},
 		},
 		{
@@ -1291,11 +1291,11 @@ func TestAdminFeedAndQueueControlsHaveProgrammaticLabels(t *testing.T) {
 			target: "/admin/queue",
 			call:   handler.HandleAdminQueue,
 			want: []string{
-				fmt.Sprintf(`aria-label="Priority for queue job %d npm/left-pad"`, jobIDByName["left-pad"]),
-				fmt.Sprintf(`aria-label="Save priority for queue job %d npm/left-pad"`, jobIDByName["left-pad"]),
-				fmt.Sprintf(`aria-label="Pause queue job %d npm/left-pad"`, jobIDByName["left-pad"]),
-				fmt.Sprintf(`aria-label="Resume queue job %d npm/express"`, jobIDByName["express"]),
-				fmt.Sprintf(`aria-label="Retry queue job %d npm/broken"`, jobIDByName["broken"]),
+				fmt.Sprintf(`<span class="sr-only">Priority for queue job %d npm/left-pad</span>`, jobIDByName["left-pad"]),
+				fmt.Sprintf(`aria-label='Save Priority for queue job %d npm/left-pad'`, jobIDByName["left-pad"]),
+				fmt.Sprintf(`aria-label='Pause queue job %d npm/left-pad'`, jobIDByName["left-pad"]),
+				fmt.Sprintf(`aria-label='Resume queue job %d npm/express'`, jobIDByName["express"]),
+				fmt.Sprintf(`aria-label='Retry queue job %d npm/broken'`, jobIDByName["broken"]),
 				`min-h-11`,
 				`px-3 py-2`,
 			},
@@ -1405,9 +1405,9 @@ func TestAdminPrintSnapshotsSuppressMutationControls(t *testing.T) {
 			}{
 				{tag: "div", marker: `data-admin-queue-bulk-actions`},
 				{tag: "th", marker: ">Actions</th>"},
-				{tag: "div", marker: `aria-label="Pause queue job`},
-				{tag: "div", marker: `aria-label="Resume queue job`},
-				{tag: "div", marker: `aria-label="Retry queue job`},
+				{tag: "fieldset", marker: `aria-label='Pause queue job`},
+				{tag: "fieldset", marker: `aria-label='Resume queue job`},
+				{tag: "fieldset", marker: `aria-label='Retry queue job`},
 			},
 		},
 		{
@@ -1431,7 +1431,7 @@ func TestAdminPrintSnapshotsSuppressMutationControls(t *testing.T) {
 			}{
 				{tag: "div", marker: `class="no-print pm-surface p-5" data-no-print`},
 				{tag: "th", marker: ">Actions</th>"},
-				{tag: "a", marker: `aria-label="Edit manual advisory manual:vuln for npm/left-pad"`},
+				{tag: "a", marker: `aria-label='Edit manual advisory manual:vuln for npm/left-pad'`},
 				{tag: "details", marker: `aria-label="Delete manual advisory manual:vuln for npm/left-pad"`},
 			},
 		},
@@ -1641,7 +1641,7 @@ func TestAdminQueueBulkActionsWrapAndUseInlineConfirmations(t *testing.T) {
 		`data-no-print`,
 		`class="w-full sm:w-auto"`,
 		`aria-label="Purge completed and errored queue jobs"`,
-		`aria-label="Confirm purge 2 completed and errored queue jobs"`,
+		`aria-label='Confirm purge 2 completed and errored queue jobs'`,
 		`Purge Completed/Errored`,
 		`Confirm purge`,
 		`Confirm clear pending`,
@@ -1692,11 +1692,11 @@ func TestAdminQueueBulkActionsShowCountsAndDisableEmptyDestructiveActions(t *tes
 	body := rec.Body.String()
 	for _, want := range []string{
 		`Purge 2 completed/errored jobs?`,
-		`aria-label="Confirm purge 2 completed and errored queue jobs"`,
+		`aria-label='Confirm purge 2 completed and errored queue jobs'`,
 		`Clear 2 pending queue jobs?`,
-		`aria-label="Confirm clear 2 pending queue jobs"`,
+		`aria-label='Confirm clear pending (2 queue jobs)'`,
 		`Clear 1 paused queue job?`,
-		`aria-label="Confirm clear 1 paused queue job"`,
+		`aria-label='Confirm clear paused (1 queue job)'`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("GET /admin/queue body missing %q\nbody=%s", want, body)
@@ -1721,8 +1721,10 @@ func TestAdminQueueBulkActionsShowCountsAndDisableEmptyDestructiveActions(t *tes
 		t.Fatalf("GET /admin/queue empty status = %d, want 200; body=%s", emptyRec.Code, emptyRec.Body.String())
 	}
 	emptyBody := emptyRec.Body.String()
+	if got := strings.Count(emptyBody, "<output\n      data-unavailable-action"); got != 3 {
+		t.Fatalf("GET /admin/queue empty body unavailable-action placeholders = %d, want 3 (purge, pending, paused)\nbody=%s", got, emptyBody)
+	}
 	for _, want := range []string{
-		`aria-disabled="true"`,
 		`No completed or errored jobs to purge.`,
 		`No pending queue jobs to clear.`,
 		`No paused queue jobs to clear.`,
@@ -2124,8 +2126,8 @@ func TestAdminRowActionsHaveMobileReachableLists(t *testing.T) {
 			marker: "queue",
 			want: []string{
 				`npm/left-pad`,
-				fmt.Sprintf(`aria-label="Pause queue job %d npm/left-pad"`, jobID),
-				fmt.Sprintf(`aria-label="Save priority for queue job %d npm/left-pad"`, jobID),
+				fmt.Sprintf(`aria-label='Pause queue job %d npm/left-pad'`, jobID),
+				fmt.Sprintf(`aria-label='Save Priority for queue job %d npm/left-pad'`, jobID),
 			},
 		},
 		{
@@ -2145,7 +2147,7 @@ func TestAdminRowActionsHaveMobileReachableLists(t *testing.T) {
 			marker: "advisories",
 			want: []string{
 				`manual:vuln`,
-				`aria-label="Edit manual advisory manual:vuln for npm/left-pad"`,
+				`aria-label='Edit manual advisory manual:vuln for npm/left-pad'`,
 				`aria-label="Delete manual advisory manual:vuln for npm/left-pad"`,
 			},
 		},

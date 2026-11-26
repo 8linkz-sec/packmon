@@ -8,8 +8,7 @@
 {{define "admin-queue-row-actions"}}
 {{$root := .Root}}
 {{$job := .Job}}
-<div
-  role="group"
+<fieldset
   aria-label="{{t "admin.queue.row.actions_aria" $job.ID $job.Ecosystem $job.Name}}"
   class="no-print flex flex-wrap items-center gap-2 md:justify-end"
   data-admin-queue-row-actions
@@ -19,20 +18,22 @@
     <input type="hidden" name="_csrf" value="{{$root.CSRFToken}}">
     <input type="hidden" name="job_id" value="{{$job.ID}}">
     {{template "admin-queue-return-state" $root}}
-    <select
-      name="priority"
-      aria-label="{{t "admin.queue.row.priority.aria" $job.ID $job.Ecosystem $job.Name}}"
-      aria-describedby="queue-priority-help"
-      class="pm-form-control w-auto md:min-h-6 md:px-2 md:py-0.5 md:text-xs"
-    >
-      {{range $root.QueuePriorityOptions}}
-      <option value="{{.Value}}" {{if eq $job.Priority .Value}}selected{{end}}>{{.Label}}</option>
-      {{end}}
-    </select>
+    <label class="inline-flex">
+      <span class="sr-only">{{t "admin.queue.row.priority.aria" $job.ID $job.Ecosystem $job.Name}}</span>
+      <select
+        name="priority"
+        aria-describedby="queue-priority-help"
+        class="pm-form-control w-auto md:min-h-6 md:px-2 md:py-0.5 md:text-xs"
+      >
+        {{range $root.QueuePriorityOptions}}
+        <option value="{{.Value}}" {{if eq $job.Priority .Value}}selected{{end}}>{{.Label}}</option>
+        {{end}}
+      </select>
+    </label>
     <button
       type="submit"
       data-submit-lock-button
-      aria-label="{{t "admin.queue.row.priority.save_aria" $job.ID $job.Ecosystem $job.Name}}"
+      aria-label='{{t "admin.queue.row.priority.save"}} {{t "admin.queue.row.priority.save_aria_context" $job.ID $job.Ecosystem $job.Name}}'
       class="{{adminGhostButtonClass "md:min-h-6 md:px-2 md:py-0.5 md:text-xs"}}"
     >{{t "admin.queue.row.priority.save"}}</button>
   </form>
@@ -44,7 +45,7 @@
     <button
       type="submit"
       data-submit-lock-button
-      aria-label="{{t "admin.queue.row.pause_aria" $job.ID $job.Ecosystem $job.Name}}"
+      aria-label='{{t "admin.queue.row.pause"}} {{t "admin.queue.row.pause_aria_context" $job.ID $job.Ecosystem $job.Name}}'
       class="{{adminSecondaryButtonClass "md:min-h-6 md:px-2 md:py-0.5 md:text-xs"}}"
     >{{t "admin.queue.row.pause"}}</button>
   </form>
@@ -56,7 +57,7 @@
     <button
       type="submit"
       data-submit-lock-button
-      aria-label="{{t "admin.queue.row.resume_aria" $job.ID $job.Ecosystem $job.Name}}"
+      aria-label='{{t "admin.queue.row.resume"}} {{t "admin.queue.row.resume_aria_context" $job.ID $job.Ecosystem $job.Name}}'
       class="{{adminAccentOutlineButtonClass "md:min-h-6 md:px-2 md:py-0.5 md:text-xs"}}"
     >{{t "admin.queue.row.resume"}}</button>
   </form>
@@ -68,12 +69,12 @@
     <button
       type="submit"
       data-submit-lock-button
-      aria-label="{{t "admin.queue.row.retry_aria" $job.ID $job.Ecosystem $job.Name}}"
+      aria-label='{{t "admin.queue.row.retry"}} {{t "admin.queue.row.retry_aria_context" $job.ID $job.Ecosystem $job.Name}}'
       class="{{adminAccentOutlineButtonClass "md:min-h-6 md:px-2 md:py-0.5 md:text-xs"}}"
     >{{t "admin.queue.row.retry"}}</button>
   </form>
   {{end}}
-</div>
+</fieldset>
 {{end}}
 
 {{define "content"}}
@@ -126,7 +127,7 @@
           <button
             type="submit"
             data-submit-lock-button
-            aria-label="{{t "admin.queue.bulk.confirm_purge_aria" .QueuePurgeCount}}"
+            aria-label='{{t "admin.queue.bulk.confirm_purge"}} {{t "admin.queue.bulk.confirm_purge_aria_context" .QueuePurgeCount}}'
             class="{{adminDangerButtonClass "w-full sm:w-auto"}}"
           >
             {{t "admin.queue.bulk.confirm_purge"}}
@@ -135,14 +136,13 @@
       </div>
     </details>
     {{else}}
-    <div
-      aria-disabled="true"
-      role="status"
+    <output
+      data-unavailable-action
       class="inline-flex min-h-8 w-full items-center justify-center rounded-md border border-muted
         bg-surface-2 px-4 py-1.5 text-sm font-medium text-fg sm:w-auto"
     >
       {{t "admin.queue.bulk.no_purge"}}
-    </div>
+    </output>
     {{end}}
     {{range .QueueClearActions}}
     {{if gt .Count 0}}
@@ -164,7 +164,7 @@
           <button
             type="submit"
             data-submit-lock-button
-            aria-label="{{t "admin.queue.bulk.confirm_clear_aria" .Count .Status (word .Count "job" "jobs")}}"
+            aria-label='{{t "admin.queue.bulk.confirm_clear" .Status}} {{t "admin.queue.bulk.confirm_clear_aria_context" .Count (word .Count "job" "jobs")}}'
             class="{{adminDangerButtonClass "w-full sm:w-auto"}}"
           >
             {{t "admin.queue.bulk.confirm_clear" .Status}}
@@ -173,14 +173,13 @@
       </div>
     </details>
     {{else}}
-    <div
-      aria-disabled="true"
-      role="status"
+    <output
+      data-unavailable-action
       class="inline-flex min-h-8 w-full items-center justify-center rounded-md border border-muted
         bg-surface-2 px-4 py-1.5 text-sm font-medium text-fg sm:w-auto"
     >
       {{t "admin.queue.bulk.no_clear" .Status}}
-    </div>
+    </output>
     {{end}}
     {{end}}
   </div>
@@ -286,10 +285,9 @@
       </div>
       {{end}}
     </div>
-    <div
+    <section
       class="hidden md:block pm-scroll-region"
       tabindex="0"
-      role="region"
       aria-label="Refresh queue jobs table"
       data-admin-desktop-table="queue"
     >
@@ -350,7 +348,7 @@
           {{end}}
         </tbody>
       </table>
-    </div>
+    </section>
     {{else}}
     <div class="pm-empty-state">
       {{$empty := .QueueEmptyState}}

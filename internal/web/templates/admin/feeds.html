@@ -5,7 +5,7 @@
 {{end}}
 
 {{define "admin-feed-runtime"}}
-  <div id="admin-feed-runtime-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+  <output id="admin-feed-runtime-announcement" class="sr-only" aria-live="polite" aria-atomic="true">
     {{if .FeedStatusLoadError}}
       {{t "admin.feeds.runtime.load_failed"}}
     {{else if .Feeds}}
@@ -13,7 +13,7 @@
     {{else}}
       {{t "admin.feeds.runtime.updated_empty"}}
     {{end}}
-  </div>
+  </output>
   <div class="pm-surface">
     <div class="px-5 py-3 border-b border-border">
       <h2 class="text-lg font-semibold">{{t "admin.feeds.runtime.heading"}}</h2>
@@ -86,10 +86,9 @@
       </article>
       {{end}}
     </div>
-    <div
+    <section
       class="hidden pm-scroll-region md:block"
       tabindex="0"
-      role="region"
       aria-label="{{t "admin.feeds.runtime.table_aria"}}"
       data-preserve-scroll="admin-feed-runtime-table"
       data-admin-desktop-table="feed-runtime"
@@ -155,7 +154,7 @@
           {{end}}
         </tbody>
       </table>
-    </div>
+    </section>
     {{else}}
     <div class="pm-empty-state">
       <p class="text-sm font-medium text-fg">{{t "admin.feeds.runtime.empty"}}</p>
@@ -202,16 +201,15 @@
     data-auto-refresh-running-class="bg-success-bg text-success-fg"
     data-auto-refresh-paused-class="bg-surface-2 text-fg"
   >
-    <span id="admin-feed-runtime-refresh-state" data-auto-refresh-status role="status" aria-live="polite" aria-atomic="true"
+    <output id="admin-feed-runtime-refresh-state" data-auto-refresh-status aria-live="polite" aria-atomic="true"
       class="text-muted"
-    >{{t "admin.feeds.runtime.refresh_on"}}</span>
-    <span
+    >{{t "admin.feeds.runtime.refresh_on"}}</output>
+    <output
       id="admin-feed-runtime-indicator"
       class="htmx-indicator text-muted"
-      role="status"
       aria-live="polite"
       aria-atomic="true"
-    >{{t "admin.feeds.runtime.refreshing"}}</span>
+    >{{t "admin.feeds.runtime.refreshing"}}</output>
     <button
       type="button"
       data-auto-refresh-toggle
@@ -224,7 +222,7 @@
       type="button"
       data-auto-refresh-now
       aria-controls="admin-feed-runtime"
-    aria-label="{{t "admin.feeds.runtime.refresh_now_aria"}}"
+    aria-label='{{t "admin.feeds.runtime.refresh_now"}} {{t "admin.feeds.runtime.refresh_now_aria_context"}}'
       class="{{adminAccentOutlineButtonClass}}"
   >{{t "admin.feeds.runtime.refresh_now"}}</button>
   </div>
@@ -408,7 +406,7 @@
               </div>
 
               <div class="flex flex-wrap items-center gap-2">
-                <button type="submit" data-submit-lock-button aria-label="{{t "admin.feeds.form.save_aria" .FeedName}}"
+                <button type="submit" data-submit-lock-button aria-label='{{t "admin.feeds.form.save"}} {{t "admin.feeds.form.save_aria_context" .FeedName}}'
                   class="{{adminPrimaryButtonClass}}"
                 >
                   {{t "admin.feeds.form.save"}}
@@ -416,7 +414,7 @@
                 {{if .CanSyncNow}}
                 <button
                   type="submit"
-                  aria-label="{{t "admin.feeds.sync.aria" .FeedName}}"
+                  aria-label='{{t "admin.feeds.sync.button"}} {{t "admin.feeds.sync.aria_context" .FeedName}}'
                   formaction="/admin/feeds/sync"
                   formmethod="POST"
                   hx-post="/admin/feeds/sync"
@@ -456,7 +454,7 @@
               {{t "admin.feeds.reset.confirm" .FeedName}}
             </label>
             <span id="feed-{{.FeedKey}}-confirm-reset-help" class="sr-only">{{t "admin.feeds.reset.help" .FeedName}}</span>
-            <button type="submit" data-submit-lock-button aria-label="{{t "admin.feeds.reset.aria" .FeedName}}"
+            <button type="submit" data-submit-lock-button aria-label='{{t "admin.feeds.reset.button"}} {{t "admin.feeds.reset.aria_context" .FeedName}}'
               class="{{adminSecondaryButtonClass}}"
             >
               {{t "admin.feeds.reset.button"}}

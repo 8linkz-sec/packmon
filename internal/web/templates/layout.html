@@ -52,11 +52,13 @@
           {{end}}
         </div>
         <div class="ms-auto flex flex-wrap items-center gap-2 text-sm">
-          <div class="pm-seg" role="group" aria-label="{{t "theme.label"}}" data-pm-theme-switcher>
-            <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="light" aria-pressed="false">{{t "theme.light"}}</button>
-            <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="dark" aria-pressed="false">{{t "theme.dark"}}</button>
-            <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="system" aria-pressed="true">{{t "theme.system"}}</button>
-          </div>
+          <fieldset class="flex" aria-label="{{t "theme.label"}}" data-pm-theme-switcher>
+            <div class="pm-seg">
+              <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="light" aria-pressed="false">{{t "theme.light"}}</button>
+              <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="dark" aria-pressed="false">{{t "theme.dark"}}</button>
+              <button type="button" class="pm-seg-btn pm-focus-ring" data-pm-theme-set="system" aria-pressed="true">{{t "theme.system"}}</button>
+            </div>
+          </fieldset>
         </div>
       </div>
     </div>

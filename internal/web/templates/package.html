@@ -121,7 +121,7 @@
       {{t "package.showing_first" (len .Vulnerabilities) .VulnerabilitiesTotal .VulnerabilitiesHidden}}
     </div>
     {{end}}
-    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="{{t "package.vulnerability.table"}}">
+    <section class="pm-scroll-region" tabindex="0" aria-label="{{t "package.vulnerability.table"}}">
       <table class="min-w-full text-sm package-finding-print-table">
         <thead>
           <tr class="text-start text-muted border-b bg-bg">
@@ -154,7 +154,7 @@
           {{end}}
         </tbody>
       </table>
-    </div>
+    </section>
     {{else}}
     <div class="pm-empty-state">
       {{t "package.vulnerabilities.empty"}}
@@ -207,7 +207,6 @@
     href="{{.URL}}"
     target="_blank"
     rel="noopener"
-    aria-label="{{newTabAriaLabel .Label}}"
     class="inline-flex min-h-6 items-center rounded border border-border bg-surface-2 px-2 py-0.5 text-xs font-medium text-fg hover:underline"
   ><bdi dir="auto">{{.Label}}</bdi>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
   {{end}}
@@ -218,7 +217,6 @@
   href="{{.URL}}"
   target="_blank"
   rel="noopener"
-  aria-label="{{newTabAriaLabel $label}}"
   class="inline-flex min-h-6 items-center rounded border border-border bg-surface-2 px-2 py-0.5 text-xs font-medium text-fg hover:underline"
 ><bdi dir="auto">{{$label}}</bdi>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
 {{else}}

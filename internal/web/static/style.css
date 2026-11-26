@@ -136,7 +136,8 @@ input:disabled,
 select:disabled,
 textarea:disabled,
 fieldset:disabled,
-[aria-disabled="true"] {
+[aria-disabled="true"],
+[data-unavailable-action] {
   cursor: not-allowed;
   opacity: 0.6;
 }
@@ -145,7 +146,8 @@ button:disabled,
 input:disabled,
 select:disabled,
 textarea:disabled,
-[aria-disabled="true"] {
+[aria-disabled="true"],
+[data-unavailable-action] {
   pointer-events: none;
 }
 

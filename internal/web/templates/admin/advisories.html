@@ -237,10 +237,9 @@
       </div>
       {{end}}
     </div>
-    <div
+    <section
       class="hidden md:block pm-scroll-region"
       tabindex="0"
-      role="region"
       aria-label="Manual advisories table"
       data-admin-desktop-table="advisories"
     >
@@ -307,7 +306,7 @@
           {{end}}
         </tbody>
       </table>
-    </div>
+    </section>
     {{else if .AdvisoryPageOutOfRange}}
     <div class="rounded-md border border-warning bg-warning-bg p-5 text-sm text-warning-fg">
       <p class="font-medium">No manual advisories on this page.</p>
@@ -344,7 +343,7 @@
 {{define "admin-advisory-actions"}}
 <a
   href="/admin/advisories?edit={{.Advisory.ID}}{{if gt .CurrentOffset 0}}&amp;offset={{.CurrentOffset}}{{end}}"
-  aria-label="{{t "admin.advisories.action.edit_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}"
+  aria-label='{{t "admin.advisories.action.edit"}} {{t "admin.advisories.action.aria_context" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}'
   class="{{adminGhostButtonClass "no-print"}}"
   data-no-print
 >{{t "admin.advisories.action.edit"}}</a>
@@ -389,7 +388,7 @@
     <button
       type="submit"
       data-submit-lock-button
-      aria-label="{{t "admin.advisories.action.confirm_delete_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}"
+      aria-label='{{t "admin.advisories.action.confirm_delete"}} {{t "admin.advisories.action.aria_context" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}'
       class="{{adminDangerButtonClass}}"
     >{{t "admin.advisories.action.confirm_delete"}}</button>
   </form>

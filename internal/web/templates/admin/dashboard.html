@@ -36,7 +36,7 @@
       {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .FeedStatusLoadError}}
     </div>
     {{else if .Feeds}}
-    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="Admin feed sync status table">
+    <section class="pm-scroll-region" tabindex="0" aria-label="Admin feed sync status table">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-start text-muted border-b border-border">
@@ -72,7 +72,7 @@
           {{end}}
         </tbody>
       </table>
-    </div>
+    </section>
     {{else}}
     <div class="pm-empty-state">
       <p class="text-sm font-medium text-fg">No feed data available.</p>

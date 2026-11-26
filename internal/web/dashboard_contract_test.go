@@ -186,7 +186,7 @@ func TestDashboardContractMainRegionHasNoControls(t *testing.T) {
 func TestDashboardContractExposesThemeSwitcherAndSkipLink(t *testing.T) {
 	doc, _ := renderDashboardForContract(t)
 
-	if findFirstElementWithAttr(doc, "div", "data-pm-theme-switcher") == nil {
+	if findFirstElementWithAttr(doc, "fieldset", "data-pm-theme-switcher") == nil {
 		t.Fatal("layout is missing the theme switcher")
 	}
 	buttons := 0

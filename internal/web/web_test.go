@@ -2322,9 +2322,10 @@ func TestHandlePackage_ReturnsOK(t *testing.T) {
 			t.Fatalf("Package response does not contain the expected resource link label %q", label)
 		}
 	}
+	for _, label := range []string{"GHSA", "NVD"} {
+		newTabLinkNamedByContent(t, body, label)
+	}
 	for _, want := range []string{
-		`aria-label="GHSA opens in a new tab"`,
-		`aria-label="NVD opens in a new tab"`,
 		`data-external-link-icon`,
 		`aria-hidden="true"`,
 		`focusable="false"`,
@@ -2394,8 +2395,8 @@ func TestDashboardExternalAdvisoryLinksAndTimesAreAccessible(t *testing.T) {
 		t.Fatalf("Dashboard status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	body := rec.Body.String()
+	newTabLinkNamedByContent(t, body, "CVE-2026-0001")
 	for _, want := range []string{
-		`aria-label="CVE-2026-0001 advisory opens in a new tab"`,
 		`data-external-link-icon`,
 		`aria-hidden="true"`,
 		`focusable="false"`,

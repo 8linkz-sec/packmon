@@ -220,7 +220,7 @@ func TestHandlePackageInteractiveControlsMeetTouchTargetHeight(t *testing.T) {
 
 	// Advisory resource chips are deliberately compact badge-sized links, but
 	// must not shrink below the WCAG 2.5.8 minimum target size (24px).
-	resourceLink := tagContaining(t, body, `<a`, `aria-label="GHSA opens in a new tab"`)
+	resourceLink := newTabLinkNamedByContent(t, body, "GHSA")
 	if !strings.Contains(resourceLink, "min-h-6") {
 		t.Fatalf("advisory resource chip missing min-h-6 minimum target size:\n%s", resourceLink)
 	}
@@ -285,24 +285,14 @@ func TestHandlePackageFallbackResourceLinksUseFindingContextLabels(t *testing.T)
 	}
 	body := rec.Body.String()
 	for _, notWant := range []string{
-		`aria-label="Link opens in a new tab"`,
 		">Link",
 	} {
 		if strings.Contains(body, notWant) {
 			t.Fatalf("Package fallback resource links still render generic label %q:\n%s", notWant, body)
 		}
 	}
-	for _, want := range []string{
-		`aria-label="GHSA advisory opens in a new tab"`,
-		`<bdi dir="auto">GHSA advisory</bdi>`,
-		`aria-label="OpenSSF malware report opens in a new tab"`,
-		`<bdi dir="auto">OpenSSF malware report</bdi>`,
-		`aria-label="ReversingLabs reputation report opens in a new tab"`,
-		`<bdi dir="auto">ReversingLabs reputation report</bdi>`,
-	} {
-		if !strings.Contains(body, want) {
-			t.Fatalf("Package fallback resource links missing contextual label %q:\n%s", want, body)
-		}
+	for _, label := range []string{"GHSA advisory", "OpenSSF malware report", "ReversingLabs reputation report"} {
+		newTabLinkNamedByContent(t, body, label)
 	}
 }
 
@@ -849,4 +839,43 @@ func tagContaining(t *testing.T, body, open, marker string) string {
 		t.Fatalf("Body missing tag close after %q:\n%s", marker, body)
 	}
 	return body[start : markerIndex+end+1]
+}
+
+// newTabLinkNamedByContent returns the rendered link whose visible label is
+// label and fails unless the link opens a new tab and takes its accessible name
+// from its content: the visible label followed by the screen-reader new-tab
+// note, with no aria-label overriding it.
+func newTabLinkNamedByContent(t *testing.T, body, label string) string {
+	t.Helper()
+
+	marker := `<bdi dir="auto">` + label + `</bdi>`
+	markerIndex, start := -1, -1
+	for searchFrom := 0; ; {
+		next := strings.Index(body[searchFrom:], marker)
+		if next < 0 {
+			t.Fatalf("Body has no link whose content starts with %q:\n%s", marker, body)
+		}
+		markerIndex = searchFrom + next
+		start = strings.LastIndex(body[:markerIndex], "<")
+		if start >= 0 && (strings.HasPrefix(body[start:], "<a ") || strings.HasPrefix(body[start:], "<a\n")) {
+			break
+		}
+		searchFrom = markerIndex + len(marker)
+	}
+	end := strings.Index(body[markerIndex:], "</a>")
+	if end < 0 {
+		t.Fatalf("link label %q has no closing </a>:\n%s", label, body)
+	}
+	link := body[start : markerIndex+end+len("</a>")]
+	openTag := body[start:markerIndex]
+	if !strings.Contains(openTag, `target="_blank"`) {
+		t.Fatalf("link %q does not open a new tab:\n%s", label, link)
+	}
+	if strings.Contains(openTag, "aria-label=") {
+		t.Fatalf("link %q overrides its visible label with aria-label:\n%s", label, link)
+	}
+	if !strings.HasSuffix(link, `<span class="sr-only"> (opens in a new tab)</span></a>`) {
+		t.Fatalf("link %q is missing the screen-reader new-tab note after its label:\n%s", label, link)
+	}
+	return link
 }

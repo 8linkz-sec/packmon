@@ -18,7 +18,7 @@ func TestAdminAdvisoryActionsUseSharedPartial(t *testing.T) {
 		`name="return_offset" value="{{.CurrentOffset}}"`,
 		`data-submit-lock-label="{{t "admin.advisories.action.deleting"}}"`,
 		`id="adv-delete-confirm-{{.ConfirmIDPrefix}}-{{.Advisory.ID}}"`,
-		`aria-label="{{t "admin.advisories.action.confirm_delete_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}"`,
+		`aria-label='{{t "admin.advisories.action.confirm_delete"}} {{t "admin.advisories.action.aria_context" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}'`,
 	} {
 		if !strings.Contains(partial, want) {
 			t.Fatalf("admin-advisory-actions partial missing %q:\n%s", want, partial)
@@ -38,7 +38,7 @@ func TestAdminAdvisoryActionsUseSharedPartial(t *testing.T) {
 			`href="/admin/advisories?edit=`,
 			`action="/admin/advisories/delete"`,
 			`admin.advisories.action.deleting`,
-			`admin.advisories.action.confirm_delete_aria`,
+			`admin.advisories.action.aria_context`,
 		} {
 			if strings.Contains(section, duplicated) {
 				t.Fatalf("%s advisory section still copies shared action markup %q:\n%s", name, duplicated, section)
@@ -79,9 +79,9 @@ func extractMarkedSection(t *testing.T, source, marker string) string {
 	if index < 0 {
 		t.Fatalf("template section marker %q missing:\n%s", marker, source)
 	}
-	start := strings.LastIndex(source[:index], "<div")
+	start := max(strings.LastIndex(source[:index], "<div"), strings.LastIndex(source[:index], "<section"))
 	if start < 0 {
-		t.Fatalf("template section marker %q has no containing div:\n%s", marker, source)
+		t.Fatalf("template section marker %q has no containing div or section:\n%s", marker, source)
 	}
 	sectionEnd := len(source)
 	for _, endMarker := range []string{

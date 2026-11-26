@@ -17,16 +17,15 @@
       data-auto-refresh-running-class="bg-success-bg text-success-fg"
       data-auto-refresh-paused-class="bg-surface-2 text-fg"
     >
-      <span id="feed-status-refresh-state" data-auto-refresh-status role="status" aria-live="polite" aria-atomic="true"
+      <output id="feed-status-refresh-state" data-auto-refresh-status aria-live="polite" aria-atomic="true"
         class="text-muted"
-      >{{t "feeds.refresh.running"}}</span>
-      <span
+      >{{t "feeds.refresh.running"}}</output>
+      <output
         id="feed-status-indicator"
         class="htmx-indicator text-muted"
-        role="status"
         aria-live="polite"
         aria-atomic="true"
-      >{{t "feeds.refreshing"}}</span>
+      >{{t "feeds.refreshing"}}</output>
       <button
         type="button"
         data-auto-refresh-toggle
@@ -40,7 +39,7 @@
         type="button"
         data-auto-refresh-now
         aria-controls="feed-status-container"
-        aria-label="{{t "feeds.refresh.now_aria"}}"
+        aria-label='{{t "feeds.refresh.now"}} {{t "feeds.refresh.now_aria_context"}}'
         class="inline-flex min-h-8 items-center justify-center border border-accent bg-surface rounded-md px-3 py-1.5 text-sm
           font-medium text-accent hover:bg-surface-2 active:bg-info-bg pm-focus-ring"
       >{{t "feeds.refresh.now"}}</button>
@@ -72,7 +71,7 @@
 {{end}}
 
 {{define "feed-status-partial"}}
-<div id="feed-status-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true">
+<output id="feed-status-announcement" class="sr-only" aria-live="polite" aria-atomic="true">
   {{if .LoadError}}
     {{t "feeds.status.load_failed"}}
   {{else if .Feeds}}
@@ -80,17 +79,16 @@
   {{else}}
     {{t "feeds.status.updated_empty"}}
   {{end}}
-</div>
+</output>
 <div class="pm-surface">
   {{if .LoadError}}
   <div class="px-5 py-4 border-b border-danger">
     {{template "admin-alert" dict "Variant" "error" "Icon" true "Message" .LoadError}}
   </div>
   {{else if .Feeds}}
-  <div
+  <section
     class="pm-scroll-region"
     tabindex="0"
-    role="region"
     aria-label="{{t "feeds.table.label"}}"
     data-preserve-scroll="feed-status-table"
   >
@@ -132,7 +130,7 @@
         {{end}}
       </tbody>
     </table>
-  </div>
+  </section>
   {{else}}
   <div class="pm-empty-state py-10">
     {{t "feeds.empty"}}
