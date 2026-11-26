@@ -177,6 +177,17 @@ textarea:disabled,
   }
 }
 
+/*
+ * The preference and print overrides below need no !important: this file is
+ * unlayered, so its declarations win over every layered Tailwind utility by
+ * the cascade alone. Only rules from this file can compete, and the few
+ * selectors that would lose to one of them are raised explicitly:
+ * - ":root .shadow" (0,2,0) beats the dark-theme elevation rules above by
+ *   source order;
+ * - ":is(...):focus" (0,2,0) beats ".skip-link:focus" by source order, while
+ *   outline-offset keeps the per-element selectors it always had;
+ * - ":root a" (0,1,1) beats the ".skip-link" colour.
+ */
 @media (prefers-contrast: more) {
   :root {
     color-scheme: light;
@@ -190,8 +201,8 @@ textarea:disabled,
   .bg-warning-bg,
   .bg-info-bg,
   .bg-success-bg {
-    background: white !important;
-    color: black !important;
+    background: white;
+    color: black;
   }
 
   .text-muted,
@@ -203,19 +214,19 @@ textarea:disabled,
   .text-warning-fg,
   .text-success-fg,
   .text-info-fg {
-    color: black !important;
+    color: black;
   }
 
   .border,
   [class*="border-"] {
-    border-color: black !important;
+    border-color: black;
   }
 
-  .shadow,
-  .shadow-sm,
-  .shadow-lg,
-  .hover\:shadow-md:hover {
-    box-shadow: none !important;
+  :root .shadow,
+  :root .shadow-sm,
+  :root .shadow-lg,
+  :root .hover\:shadow-md:hover {
+    box-shadow: none;
   }
 
   a {
@@ -230,16 +241,19 @@ textarea:disabled,
   textarea:focus,
   summary:focus,
   [tabindex]:focus {
-    outline: 3px solid black !important;
     outline-offset: 3px;
-    box-shadow: none !important;
+  }
+
+  :is(a, button, input, select, textarea, summary, [tabindex]):focus {
+    outline: 3px solid black;
+    box-shadow: none;
   }
 }
 
 @media print {
   body {
-    background: white !important;
-    color: black !important;
+    background: white;
+    color: black;
   }
 
   nav,
@@ -249,16 +263,16 @@ textarea:disabled,
   [data-no-print],
   [data-auto-refresh-control],
   form[action="/admin/logout"] {
-    display: none !important;
+    display: none;
   }
 
   main {
-    max-width: none !important;
-    padding: 0 !important;
+    max-width: none;
+    padding: 0;
   }
 
-  .shadow {
-    box-shadow: none !important;
+  :root .shadow {
+    box-shadow: none;
   }
 
   .bg-surface,
@@ -268,28 +282,28 @@ textarea:disabled,
   .bg-warning-bg,
   .bg-info-bg,
   .bg-success-bg {
-    background: white !important;
+    background: white;
   }
 
   .overflow-x-auto {
-    overflow: visible !important;
+    overflow: visible;
   }
 
   .package-finding-print-table {
-    table-layout: fixed !important;
-    width: 100% !important;
+    table-layout: fixed;
+    width: 100%;
   }
 
   .package-finding-print-cell {
-    min-width: 0 !important;
-    white-space: normal !important;
-    overflow-wrap: anywhere !important;
-    word-break: normal !important;
+    min-width: 0;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    word-break: normal;
   }
 
-  a {
-    color: black !important;
-    text-decoration: underline !important;
+  :root a {
+    color: black;
+    text-decoration: underline;
   }
 
   a[href^="https://"]::after,
@@ -301,7 +315,7 @@ textarea:disabled,
   }
 
   details[data-print-open]:not([open]) > :not(summary) {
-    display: block !important;
+    display: block;
   }
 
   table,
@@ -320,8 +334,11 @@ textarea:disabled,
   textarea:focus,
   summary:focus,
   [tabindex]:focus {
-    outline: 2px solid CanvasText !important;
     outline-offset: 2px;
-    box-shadow: none !important;
+  }
+
+  :is(a, button, input, select, textarea, summary, [tabindex]):focus {
+    outline: 2px solid CanvasText;
+    box-shadow: none;
   }
 }

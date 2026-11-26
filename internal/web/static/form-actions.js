@@ -259,6 +259,8 @@
         return;
       }
       event.preventDefault();
+      // Deprecated but kept: Chrome/Edge before 119 (inside the Chrome 111+
+      // baseline) show the leave-page dialog only when returnValue is set.
       event.returnValue = "";
       return "";
     });
@@ -404,7 +406,7 @@
       button.textContent = busyLabel;
     });
     button.addEventListener("htmx:afterRequest", function (event) {
-      if (event.detail && event.detail.successful) {
+      if (event.detail?.successful) {
         markRunning();
         return;
       }
@@ -412,7 +414,7 @@
     });
     button.addEventListener("htmx:responseError", function (event) {
       var flash = flashTarget ? document.querySelector(flashTarget) : null;
-      if (flash && event.detail && event.detail.xhr) {
+      if (flash && event.detail?.xhr) {
         flash.innerHTML = event.detail.xhr.responseText;
       }
       resetLabel();
