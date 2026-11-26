@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -33,6 +34,18 @@ func startMigrationPostgres(t *testing.T) string {
 
 func startMigrationPostgresInstance(t *testing.T, observability bool) migrationPostgresInstance {
 	t.Helper()
+
+	if (os.Getenv(testPostgresURLEnv) == "") != (os.Getenv(testPostgresPlainURLEnv) == "") {
+		t.Fatalf("set both %s and %s, or neither", testPostgresURLEnv, testPostgresPlainURLEnv)
+	}
+	envName := testPostgresPlainURLEnv
+	if observability {
+		envName = testPostgresURLEnv
+	}
+	if dsn, ok := serviceTestPostgresDSN(t, envName); ok {
+		waitForMigrationPostgresDSN(t, dsn)
+		return migrationPostgresInstance{dsn: dsn}
+	}
 
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Fatalf("docker not available; Docker-backed migration tests require the explicit integration gate to run against Docker: %v", err)
