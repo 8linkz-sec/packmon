@@ -1,6 +1,7 @@
 package ci
 
 import (
+	"bytes"
 	"errors"
 	"go/parser"
 	"go/token"
@@ -804,21 +805,24 @@ func TestCLILocalDBCommandsDoNotQuerySQLiteSchema(t *testing.T) {
 func TestAdminHandlerUsesConsumerOwnedStoreInterface(t *testing.T) {
 	t.Parallel()
 
-	// The admin store arrives through admin.Dependencies.Store and is kept in
-	// AdminHandler.store. Neither field may be the monolithic db.Store; the
-	// patterns tolerate any gofumpt field alignment.
-	const rel = "internal/api/admin/handler.go"
-	forbidden := []*regexp.Regexp{
-		regexp.MustCompile(`(?m)^\s*[Ss]tore\s+db\.Store\b`),
-	}
-	path := filepath.Join("..", "..", filepath.FromSlash(rel))
-	source, err := os.ReadFile(path) // #nosec G304 -- test reads fixed repository source from a static allowlist.
-	if err != nil {
-		t.Fatalf("read %s: %v", rel, err)
-	}
-	for _, pattern := range forbidden {
-		if match := pattern.Find(source); match != nil {
-			t.Fatalf("%s still accepts monolithic db.Store via %q", rel, strings.TrimSpace(string(match)))
+	// The admin handler and route wiring depend only on the consumer-owned admin
+	// store interfaces (adaptAdminStore in store_boundary.go narrows whatever
+	// arrives in Dependencies.Store). Neither file may name the monolithic
+	// db.Store at all: not as a field, an embedded field, or a parameter.
+	// store_boundary.go is out of scope because its adapter embeds db.Store.
+	monolithicStore := regexp.MustCompile(`\bdb\.Store\b`)
+	for _, rel := range []string{
+		"internal/api/admin/handler.go",
+		"internal/api/admin/routes.go",
+	} {
+		path := filepath.Join("..", "..", filepath.FromSlash(rel))
+		source, err := os.ReadFile(path) // #nosec G304 -- test reads fixed repository source from a static allowlist.
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		if loc := monolithicStore.FindIndex(source); loc != nil {
+			line := 1 + bytes.Count(source[:loc[0]], []byte("\n"))
+			t.Fatalf("%s:%d still depends on the monolithic db.Store; use the consumer-owned admin store interfaces", rel, line)
 		}
 	}
 }
