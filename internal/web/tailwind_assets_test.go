@@ -3382,9 +3382,9 @@ func TestAutoRefreshTimerSkipsBusyFocusedOrExpandedControlledTargets(t *testing.
 		`function autoRefreshTargetHasFocus(target)`,
 		`target.contains(document.activeElement)`,
 		`function autoRefreshTargetHasOpenDetails(target)`,
-		`target.querySelector("details[open]")`,
+		`target?.querySelector("details[open]")`,
 		`function autoRefreshTargetIsBusy(target)`,
-		`target.getAttribute("aria-busy") === "true"`,
+		`target?.getAttribute?.("aria-busy") === "true"`,
 		`function canDispatchAutoRefresh()`,
 		`function dispatchManualAutoRefresh()`,
 		`refreshNow.addEventListener("click", dispatchManualAutoRefresh);`,
@@ -3767,7 +3767,7 @@ func TestAutoRefreshPreservesTableScrollPosition(t *testing.T) {
 		`scrollLeft`,
 		`getLogicalScrollLeft`,
 		`setLogicalScrollLeft`,
-		`getComputedStyle(scroller).direction`,
+		`getComputedStyle?.(scroller).direction`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("htmx-regions.js missing scroll-preservation behavior %q", want)
