@@ -479,7 +479,7 @@ func syncPaginatedResponses(ctx context.Context, store *Store, client *http.Clie
 
 	// Loop to handle paginated responses.
 	for {
-		resp, err := fetchSyncPageWithCorrelationID(ctx, client, cfg, pass.cursorState.Since, pass.cursorState.SinceXID, cursor, snapshot.SyncedAt, snapshot.SyncedXID, correlationID)
+		resp, err := fetchSyncPageWithCorrelationID(ctx, client, cfg, pass.cursorState, cursor, snapshot, correlationID)
 		if err != nil {
 			return SyncStats{}, false, err
 		}
@@ -746,16 +746,18 @@ func newSyncHTTPClientWithCA(timeout time.Duration, caCertFile string) (*http.Cl
 	}, nil
 }
 
-func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, snapshot, snapshotXID string) (*syncResponse, error) {
-	return fetchSyncPageWithCorrelationID(ctx, client, cfg, since, sinceXID, cursor, snapshot, snapshotXID, newSyncCorrelationID())
+// fetchSyncPage requests one sync page: the changes after from, continued at
+// cursor within the server snapshot (zero values request the first page).
+func fetchSyncPage(ctx context.Context, client *http.Client, cfg SyncConfig, from syncCursorState, cursor syncCursor, snapshot syncPageSnapshot) (*syncResponse, error) {
+	return fetchSyncPageWithCorrelationID(ctx, client, cfg, from, cursor, snapshot, newSyncCorrelationID())
 }
 
-func fetchSyncPageWithCorrelationID(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, snapshot, snapshotXID, correlationID string) (*syncResponse, error) {
+func fetchSyncPageWithCorrelationID(ctx context.Context, client *http.Client, cfg SyncConfig, from syncCursorState, cursor syncCursor, snapshot syncPageSnapshot, correlationID string) (*syncResponse, error) {
 	if !correlation.Valid(correlationID) {
 		correlationID = newSyncCorrelationID()
 	}
 	for attempt := 0; ; attempt++ {
-		resp, retryAfter, err := fetchSyncPageOnce(ctx, client, cfg, since, sinceXID, cursor, snapshot, snapshotXID, correlationID)
+		resp, retryAfter, err := fetchSyncPageOnce(ctx, client, cfg, syncPageRequest{from: from, cursor: cursor, snapshot: snapshot}, correlationID)
 		if err == nil {
 			return resp, nil
 		}
@@ -776,8 +778,15 @@ func newSyncCorrelationID() string {
 	return id
 }
 
+// syncPageRequest is the position of one sync page request.
+type syncPageRequest struct {
+	from     syncCursorState
+	cursor   syncCursor
+	snapshot syncPageSnapshot
+}
+
 // fetchSyncPageOnce makes a single HTTP request to the server sync endpoint.
-func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig, since, sinceXID string, cursor syncCursor, snapshot, snapshotXID, correlationID string) (*syncResponse, time.Duration, error) {
+func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig, page syncPageRequest, correlationID string) (*syncResponse, time.Duration, error) {
 	displayServerURL := logsafe.RedactURL(cfg.ServerURL)
 	u, err := url.Parse(strings.TrimRight(cfg.ServerURL, "/") + "/api/v1/sync")
 	if err != nil {
@@ -785,21 +794,21 @@ func fetchSyncPageOnce(ctx context.Context, client *http.Client, cfg SyncConfig,
 	}
 
 	q := u.Query()
-	if since != "" {
-		q.Set("since", since)
+	if page.from.Since != "" {
+		q.Set("since", page.from.Since)
 	}
-	if sinceXID != "" {
-		q.Set("since_xid", sinceXID)
+	if page.from.SinceXID != "" {
+		q.Set("since_xid", page.from.SinceXID)
 	}
-	if snapshot != "" {
-		q.Set("snapshot", snapshot)
+	if page.snapshot.SyncedAt != "" {
+		q.Set("snapshot", page.snapshot.SyncedAt)
 	}
-	if snapshotXID != "" {
-		q.Set("snapshot_xid", snapshotXID)
+	if page.snapshot.SyncedXID != "" {
+		q.Set("snapshot_xid", page.snapshot.SyncedXID)
 	}
 	q.Set("limit", strconv.Itoa(syncPageLimit))
-	if !cursor.IsZero() {
-		setSyncCursorQuery(q, cursor)
+	if !page.cursor.IsZero() {
+		setSyncCursorQuery(q, page.cursor)
 	}
 	if len(cfg.Ecosystems) > 0 {
 		q.Set("ecosystem", strings.Join(cfg.Ecosystems, ","))

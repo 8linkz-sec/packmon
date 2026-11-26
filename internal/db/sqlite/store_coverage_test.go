@@ -48,14 +48,20 @@ func TestLocalPackagePredicateBranches(t *testing.T) {
 func TestLocalFindingAndReferenceHelperBranches(t *testing.T) {
 	t.Parallel()
 
-	vuln := localVulnerabilityFinding("CVE-2026-0001", "npm", "left-pad", "1.0.0", "", `[{"type":"WEB","url":"https://osv.dev/vulnerability/CVE-2026-0001"}]`, "HIGH", "", "local")
+	vuln := localVulnerabilityFinding(localVulnerabilityRow{
+		id: "CVE-2026-0001", ecosystem: "npm", name: "left-pad",
+		refsJSON: `[{"type":"WEB","url":"https://osv.dev/vulnerability/CVE-2026-0001"}]`, severity: "HIGH", source: "local",
+	}, "1.0.0")
 	if vuln.Title != "CVE-2026-0001" || vuln.URL != "https://nvd.nist.gov/vuln/detail/CVE-2026-0001" {
 		t.Fatalf("local vulnerability finding = %+v", vuln)
 	}
 	if len(vuln.Resources) != 2 || vuln.Resources[0].Label != "NVD" || vuln.Resources[1].Label != "OSV" {
 		t.Fatalf("local vulnerability resources = %+v, want NVD and OSV", vuln.Resources)
 	}
-	mal := localMaliciousFinding("MAL-1", "npm", "evil", "1.0.0", `["not a url","https://github.com/acme/evil"]`, "malware", "CRITICAL", "", "local")
+	mal := localMaliciousFinding(localMaliciousRow{
+		id: "MAL-1", ecosystem: "npm", name: "evil",
+		referencesRaw: `["not a url","https://github.com/acme/evil"]`, riskType: "malware", severity: "CRITICAL", source: "local",
+	}, "1.0.0")
 	if mal.Title != "malicious package: evil (malware)" || mal.URL != "https://github.com/acme/evil" {
 		t.Fatalf("local malicious finding = %+v", mal)
 	}
