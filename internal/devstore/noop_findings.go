@@ -104,7 +104,6 @@ func (s *Store) FindMalicious(_ context.Context, ecosystem, name, version string
 	return findings, nil
 }
 
-
 func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
 	var all []domain.Finding
 	for _, pkg := range packages {
