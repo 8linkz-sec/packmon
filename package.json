@@ -6,7 +6,7 @@
     "build:web:css": "tailwindcss -i ./internal/web/static/tailwind.input.css -o ./internal/web/static/tailwind.css --minify",
     "build:web:js": "node ./scripts/build-web-assets.mjs",
     "lint:css": "stylelint \"internal/web/static/{style,tailwind.input}.css\"",
-    "lint:js": "node --check ./scripts/build-web-assets.mjs && node --check ./internal/web/static/auto-refresh.js && node --check ./internal/web/static/theme-init.js && eslint ./scripts/build-web-assets.mjs ./internal/web/static/auto-refresh.js ./internal/web/static/theme-init.js",
+    "lint:js": "node --check ./scripts/build-web-assets.mjs && node --check ./internal/web/static/auto-refresh.js && node --check ./internal/web/static/theme-init.js && node --check ./internal/web/static/form-actions.js && node --check ./internal/web/static/htmx-regions.js && node --check ./internal/web/static/locale-format.js && eslint ./scripts/build-web-assets.mjs ./internal/web/static/auto-refresh.js ./internal/web/static/theme-init.js ./internal/web/static/form-actions.js ./internal/web/static/htmx-regions.js ./internal/web/static/locale-format.js",
     "lint:openapi": "redocly lint ./api/openapi/packmon-v1.yaml",
     "lint:web": "npm run lint:js && npm run lint:css"
   },
