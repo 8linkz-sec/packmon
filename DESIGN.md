@@ -1779,6 +1779,13 @@ job uses the Makefile's pinned linter version so local and CI runs agree. The
 repository `.gitleaks.toml` keeps the shared gitleaks policy and additionally
 allowlists only the made-up keys in the `internal/logsafe` redaction fixtures.
 
+The SonarQube analysis ignores two accepted findings, each for one rule in one
+file; the reasons sit next to the entries in `sonar-project.properties`:
+`css:S9423` in `internal/web/static/style.css`, where only the
+prefers-reduced-motion reset keeps `!important`, and `javascript:S1874` in
+`internal/web/static/form-actions.js`, whose unsaved-changes guard still sets
+the deprecated `BeforeUnloadEvent.returnValue` for Chrome and Edge before 119.
+
 The GitLab consumer template parses `feed_status`, `db_stale`, and
 `db_age_days` from the JSON result artifact and writes degraded coverage into
 the job log independently from finding count or exit-code mapping. No GitHub

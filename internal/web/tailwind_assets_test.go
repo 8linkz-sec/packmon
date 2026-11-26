@@ -235,24 +235,27 @@ func TestCustomStylesUseSafeWrappingAndPrintRules(t *testing.T) {
 	for _, want := range []string{
 		"overflow-wrap: anywhere",
 		"word-break: normal",
-		"@media print",
-		"form[action=\"/admin/logout\"]",
-		"overflow: visible !important",
-		"break-inside: avoid",
-		".package-finding-print-table",
-		".package-finding-print-cell",
-		"min-width: 0 !important",
-		"white-space: normal !important",
-		`a[href^="https://"]::after`,
-		`a[href^="http://"]::after`,
-		`content: " (" attr(href) ")"`,
-		`details[data-print-open]:not([open]) > :not(summary)`,
-		"display: block !important",
 		"background: var(--pm-meter-risk)",
 		"background: var(--pm-meter-clean)",
 	} {
 		if !strings.Contains(styleCSS, want) {
-			t.Fatalf("style.css missing safe wrapping/print/progress marker %q:\n%s", want, styleCSS)
+			t.Fatalf("style.css missing safe wrapping/progress marker %q:\n%s", want, styleCSS)
+		}
+	}
+	printCSS := cssAtRuleBlock(t, styleCSS, "@media print")
+	for _, want := range []string{
+		"form[action=\"/admin/logout\"]",
+		".overflow-x-auto {\n    overflow: visible;",
+		"break-inside: avoid",
+		".package-finding-print-table {\n    table-layout: fixed;",
+		".package-finding-print-cell {\n    min-width: 0;\n    white-space: normal;",
+		`a[href^="https://"]::after`,
+		`a[href^="http://"]::after`,
+		`content: " (" attr(href) ")"`,
+		"details[data-print-open]:not([open]) > :not(summary) {\n    display: block;",
+	} {
+		if !strings.Contains(printCSS, want) {
+			t.Fatalf("style.css print block missing marker %q:\n%s", want, printCSS)
 		}
 	}
 	if strings.Contains(styleCSS, "word-break: break-all") {
@@ -297,15 +300,14 @@ func TestCustomStylesProvideSystemDarkTheme(t *testing.T) {
 func TestCustomStylesProvideForcedColorsFocusFallback(t *testing.T) {
 	t.Parallel()
 
-	styleCSS := readTextFile(t, "static", "style.css")
+	forcedColorsCSS := cssAtRuleBlock(t, readTextFile(t, "static", "style.css"), "@media (forced-colors: active)")
 	for _, want := range []string{
-		"@media (forced-colors: active)",
 		"outline: 2px solid CanvasText",
 		"outline-offset: 2px",
-		"box-shadow: none !important",
+		"box-shadow: none",
 	} {
-		if !strings.Contains(styleCSS, want) {
-			t.Fatalf("style.css missing forced-colors focus fallback %q:\n%s", want, styleCSS)
+		if !strings.Contains(forcedColorsCSS, want) {
+			t.Fatalf("style.css missing forced-colors focus fallback %q:\n%s", want, forcedColorsCSS)
 		}
 	}
 }
@@ -351,16 +353,15 @@ func TestCustomStylesOnlyKeepBackedCustomHooks(t *testing.T) {
 func TestCustomStylesHonorPrefersContrastPreference(t *testing.T) {
 	t.Parallel()
 
-	styleCSS := readTextFile(t, "static", "style.css")
+	contrastCSS := cssAtRuleBlock(t, readTextFile(t, "static", "style.css"), "@media (prefers-contrast: more)")
 	for _, want := range []string{
-		"@media (prefers-contrast: more)",
-		"border-color: black !important",
-		"box-shadow: none !important",
+		"border-color: black",
+		"box-shadow: none",
 		"text-decoration-thickness: 0.12em",
 		"outline: 3px solid black",
 	} {
-		if !strings.Contains(styleCSS, want) {
-			t.Fatalf("style.css missing prefers-contrast rule %q:\n%s", want, styleCSS)
+		if !strings.Contains(contrastCSS, want) {
+			t.Fatalf("style.css missing prefers-contrast rule %q:\n%s", want, contrastCSS)
 		}
 	}
 }
@@ -397,15 +398,14 @@ func TestWebTemplatesUseLogicalInlineUtilities(t *testing.T) {
 func TestCustomStylesSuppressNoPrintContent(t *testing.T) {
 	t.Parallel()
 
-	styleCSS := readTextFile(t, "static", "style.css")
+	printCSS := cssAtRuleBlock(t, readTextFile(t, "static", "style.css"), "@media print")
 	for _, want := range []string{
-		"@media print",
-		".no-print",
-		"[data-no-print]",
-		"display: none !important",
+		".no-print,",
+		"[data-no-print],",
+		"display: none;",
 	} {
-		if !strings.Contains(styleCSS, want) {
-			t.Fatalf("style.css missing no-print rule %q:\n%s", want, styleCSS)
+		if !strings.Contains(printCSS, want) {
+			t.Fatalf("style.css missing no-print rule %q:\n%s", want, printCSS)
 		}
 	}
 }
@@ -854,7 +854,7 @@ func TestManualFeedSyncButtonKeepsQueuedRunningStateAfterAcceptedRequest(t *test
 		`button.dataset.feedSyncState = "running";`,
 		`button.textContent = runningLabel;`,
 		`button.setAttribute("aria-disabled", "true");`,
-		`if (event.detail && event.detail.successful) {`,
+		`if (event.detail?.successful) {`,
 		`markRunning();`,
 	} {
 		if !strings.Contains(script, want) {
@@ -3381,9 +3381,9 @@ func TestAutoRefreshTimerSkipsBusyFocusedOrExpandedControlledTargets(t *testing.
 		`function autoRefreshTargetHasFocus(target)`,
 		`target.contains(document.activeElement)`,
 		`function autoRefreshTargetHasOpenDetails(target)`,
-		`target.querySelector("details[open]")`,
+		`target?.querySelector("details[open]")`,
 		`function autoRefreshTargetIsBusy(target)`,
-		`target.getAttribute("aria-busy") === "true"`,
+		`target?.getAttribute?.("aria-busy") === "true"`,
 		`function canDispatchAutoRefresh()`,
 		`function dispatchManualAutoRefresh()`,
 		`refreshNow.addEventListener("click", dispatchManualAutoRefresh);`,
@@ -3766,7 +3766,7 @@ func TestAutoRefreshPreservesTableScrollPosition(t *testing.T) {
 		`scrollLeft`,
 		`getLogicalScrollLeft`,
 		`setLogicalScrollLeft`,
-		`getComputedStyle(scroller).direction`,
+		`getComputedStyle?.(scroller).direction`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("htmx-regions.js missing scroll-preservation behavior %q", want)
@@ -3828,7 +3828,7 @@ func TestHTMXFailuresRenderDurableTargetErrorState(t *testing.T) {
 		`target.dataset.htmxRetryLabel`,
 		`triggerHTMXRetry(target, retrySource);`,
 		`trigger.split(",").some(function (triggerPart)`,
-		`triggerPart.indexOf("changed") === -1`,
+		`!triggerPart.includes("changed")`,
 		`document.body.addEventListener("htmx:responseError"`,
 		`document.body.addEventListener("htmx:sendError"`,
 		`document.body.addEventListener("htmx:timeout"`,

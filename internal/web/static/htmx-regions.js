@@ -24,7 +24,7 @@
       outer.scrollLeft = 1;
       rtlScrollType = outer.scrollLeft === 0 ? "negative" : "reverse";
     }
-    document.body.removeChild(outer);
+    outer.remove();
     return rtlScrollType;
   }
 
@@ -38,7 +38,7 @@
 
   function getLogicalScrollLeft(scroller) {
     var raw = scroller.scrollLeft || 0;
-    if (!window.getComputedStyle || window.getComputedStyle(scroller).direction !== "rtl") {
+    if (window.getComputedStyle?.(scroller).direction !== "rtl") {
       return raw;
     }
 
@@ -54,7 +54,7 @@
   }
 
   function setLogicalScrollLeft(scroller, value) {
-    if (!window.getComputedStyle || window.getComputedStyle(scroller).direction !== "rtl") {
+    if (window.getComputedStyle?.(scroller).direction !== "rtl") {
       scroller.scrollLeft = value;
       return;
     }
@@ -87,8 +87,8 @@
     var scrollPositions = {};
 
     document.body.addEventListener("htmx:beforeSwap", function (event) {
-      var target = event.detail && event.detail.target;
-      if (!target || !target.id || !target.matches("[data-preserve-scroll-container]")) {
+      var target = event.detail?.target;
+      if (!target?.id || !target.matches("[data-preserve-scroll-container]")) {
         return;
       }
 
@@ -98,15 +98,15 @@
     });
 
     document.body.addEventListener("htmx:afterSwap", function (event) {
-      var target = event.detail && event.detail.target;
-      if (!target || !target.id || !target.matches("[data-preserve-scroll-container]")) {
+      var target = event.detail?.target;
+      if (!target?.id || !target.matches("[data-preserve-scroll-container]")) {
         return;
       }
 
       var restore = function () {
         target.querySelectorAll("[data-preserve-scroll]").forEach(function (scroller) {
           var key = scrollStateKey(target, scroller);
-          if (Object.prototype.hasOwnProperty.call(scrollPositions, key)) {
+          if (Object.hasOwn(scrollPositions, key)) {
             setLogicalScrollLeft(scroller, scrollPositions[key]);
           }
         });
@@ -121,14 +121,14 @@
   }
 
   function setHTMXBusy(target, busy) {
-    if (!target || !target.setAttribute || !target.hasAttribute("aria-busy")) {
+    if (!target?.setAttribute || !target.hasAttribute("aria-busy")) {
       return;
     }
     target.setAttribute("aria-busy", busy ? "true" : "false");
   }
 
   function setHTMXStatusMessage(target, message) {
-    if (!target || !target.dataset || !target.dataset.htmxStatusTarget || typeof message !== "string") {
+    if (!target?.dataset?.htmxStatusTarget || typeof message !== "string") {
       return;
     }
     var status = document.querySelector(target.dataset.htmxStatusTarget);
@@ -139,17 +139,17 @@
   }
 
   function clearHTMXErrorState(target) {
-    if (!target || !target.querySelectorAll || !target.removeAttribute) {
+    if (!target?.querySelectorAll || !target.removeAttribute) {
       return;
     }
     target.querySelectorAll("[data-htmx-error-state]").forEach(function (panel) {
       panel.remove();
     });
-    target.removeAttribute("data-htmx-error-visible");
+    delete target.dataset.htmxErrorVisible;
   }
 
   function firstHTMXTriggerName(element) {
-    if (!element || !element.getAttribute) {
+    if (!element?.getAttribute) {
       return "";
     }
     var trigger = element.getAttribute("hx-trigger") || "";
@@ -163,7 +163,7 @@
       if (!fallback) {
         fallback = match[1];
       }
-      if (triggerPart.indexOf("changed") === -1) {
+      if (!triggerPart.includes("changed")) {
         preferred = match[1];
         return true;
       }
@@ -176,11 +176,11 @@
     var source = retrySource || target;
     var triggerName = firstHTMXTriggerName(source) || firstHTMXTriggerName(target);
     if (triggerName) {
-      var triggerConfig = (source && source.getAttribute && source.getAttribute("hx-trigger"))
-        || (target && target.getAttribute && target.getAttribute("hx-trigger"))
+      var triggerConfig = source?.getAttribute?.("hx-trigger")
+        || target?.getAttribute?.("hx-trigger")
         || "";
       var dispatchTarget = /\bfrom:body\b/.test(triggerConfig) ? document.body : source;
-      if (dispatchTarget && dispatchTarget.dispatchEvent) {
+      if (dispatchTarget?.dispatchEvent) {
         dispatchTarget.dispatchEvent(new Event(triggerName, { bubbles: true }));
         return;
       }
@@ -191,20 +191,20 @@
   }
 
   function showHTMXErrorState(target, message, retrySource) {
-    if (!target || !target.insertBefore || !target.querySelector) {
+    if (!target?.insertBefore || !target.querySelector) {
       return;
     }
     var panel = target.querySelector("[data-htmx-error-state]");
     if (!panel) {
       panel = document.createElement("div");
-      panel.setAttribute("data-htmx-error-state", "true");
+      panel.dataset.htmxErrorState = "true";
       panel.setAttribute("role", "alert");
       panel.setAttribute("aria-live", "assertive");
       panel.setAttribute("aria-atomic", "true");
       panel.className = "mb-3 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800";
       target.insertBefore(panel, target.firstChild);
     }
-    target.setAttribute("data-htmx-error-visible", "true");
+    target.dataset.htmxErrorVisible = "true";
     panel.replaceChildren();
 
     var text = document.createElement("p");
@@ -234,10 +234,10 @@
   }
 
   function handleHTMXError(event, messageName) {
-    var target = event.detail && event.detail.target;
-    var retrySource = (event.detail && event.detail.elt) || target;
+    var target = event.detail?.target;
+    var retrySource = event.detail?.elt || target;
     var message = "";
-    if (target && target.dataset) {
+    if (target?.dataset) {
       if (messageName === "htmxTimeoutMessage") {
         message = target.dataset.htmxTimeoutMessage || "";
       } else if (messageName === "htmxSwapErrorMessage") {
@@ -260,16 +260,16 @@
 
     document.body.dataset.htmxBusyReady = "true";
     document.body.addEventListener("htmx:beforeRequest", function (event) {
-      var target = event.detail && event.detail.target;
+      var target = event.detail?.target;
       setHTMXBusy(target, true);
-      setHTMXStatusMessage(target, target && target.dataset && target.dataset.htmxLoadingMessage);
+      setHTMXStatusMessage(target, target?.dataset?.htmxLoadingMessage);
     });
     document.body.addEventListener("htmx:afterRequest", function (event) {
-      var target = event.detail && event.detail.target;
+      var target = event.detail?.target;
       setHTMXBusy(target, false);
-      if (event.detail && event.detail.successful) {
+      if (event.detail?.successful) {
         clearHTMXErrorState(target);
-        setHTMXStatusMessage(target, target && target.dataset && target.dataset.htmxSuccessMessage);
+        setHTMXStatusMessage(target, target?.dataset?.htmxSuccessMessage);
       }
     });
     document.body.addEventListener("htmx:responseError", function (event) {

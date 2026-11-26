@@ -50,11 +50,11 @@
   }
 
   function autoRefreshTargetHasOpenDetails(target) {
-    return Boolean(target && target.querySelector("details[open]"));
+    return Boolean(target?.querySelector("details[open]"));
   }
 
   function autoRefreshTargetIsBusy(target) {
-    return Boolean(target && target.getAttribute && target.getAttribute("aria-busy") === "true");
+    return target?.getAttribute?.("aria-busy") === "true";
   }
 
   function setupAutoRefresh(control) {
@@ -76,7 +76,7 @@
     var paused = readStoredAutoRefreshPaused(storageKey);
     var autoRefreshIntervalID = null;
     var toggleLabel = control.dataset.autoRefreshLabel || toggle.textContent || "";
-    var runningLabel = control.dataset.autoRefreshRunningLabel || (status && status.textContent) || "";
+    var runningLabel = control.dataset.autoRefreshRunningLabel || status?.textContent || "";
     var pausedLabel = control.dataset.autoRefreshPausedLabel || "";
     var runningClasses = splitClassList(control.dataset.autoRefreshRunningClass);
     var pausedClasses = splitClassList(control.dataset.autoRefreshPausedClass);
