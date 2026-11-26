@@ -242,13 +242,22 @@ func TestSyncPageOfOversizedRowsStaysBelowTheClientCap(t *testing.T) {
 		}
 	}
 	malicious := newSyncRowPageBuilder(limit, db.SyncMaliciousPageByteBudget, syncMaliciousWireBytes)
-	for i := 0; i < limit && malicious.add(budgetMalicious(t, i, rowSize)); i++ {
+	for i := 0; i < limit; i++ {
+		if !malicious.add(budgetMalicious(t, i, rowSize)) {
+			break
+		}
 	}
 	reputation := newSyncRowPageBuilder(limit, db.SyncReputationPageByteBudget, syncReputationWireBytes)
-	for i := 0; i < limit && reputation.add(budgetReputation(t, i, rowSize)); i++ {
+	for i := 0; i < limit; i++ {
+		if !reputation.add(budgetReputation(t, i, rowSize)) {
+			break
+		}
 	}
 	lifecycle := newSyncRowPageBuilder(limit, db.SyncLifecyclePageByteBudget, syncLifecycleWireBytes)
-	for i := 0; i < limit && lifecycle.add(budgetLifecycle(t, i, rowSize)); i++ {
+	for i := 0; i < limit; i++ {
+		if !lifecycle.add(budgetLifecycle(t, i, rowSize)) {
+			break
+		}
 	}
 
 	vulnPage, malPage, repPage, lifePage := vulns.finish(), malicious.finish(), reputation.finish(), lifecycle.finish()
