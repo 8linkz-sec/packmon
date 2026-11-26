@@ -16,7 +16,7 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@redocly/cli": "2.80.0",
+    "@redocly/cli": "2.82.0",
     "@tailwindcss/cli": "4.3.5",
     "eslint": "10.15.0",
     "htmx.org": "2.0.11",
