@@ -19,8 +19,8 @@ func TestAdminAPIKeyRowActionsUseSharedTemplatePartials(t *testing.T) {
 		`name="return_offset" value="{{.Root.KeyCurrentOffset}}"`,
 		`data-submit-lock-label="{{t "admin.keys.action.revoking"}}"`,
 		`data-submit-lock-label="{{t "admin.keys.action.deleting"}}"`,
-		`aria-label="{{t "admin.keys.action.confirm_revoke_aria" .Key.Name .Key.ID}}"`,
-		`aria-label="{{t "admin.keys.action.confirm_delete_aria" .Key.Name .Key.ID}}"`,
+		`aria-label='{{t "admin.keys.action.confirm_revoke"}} {{t "admin.keys.action.confirm_revoke_aria_context" .Key.Name .Key.ID}}'`,
+		`aria-label='{{t "admin.keys.action.confirm_delete"}} {{t "admin.keys.action.confirm_delete_aria_context" .Key.Name .Key.ID}}'`,
 	} {
 		if !strings.Contains(keys, want) {
 			t.Fatalf("admin keys template missing shared API key partial fragment %q:\n%s", want, keys)

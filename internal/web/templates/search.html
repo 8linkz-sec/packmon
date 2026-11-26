@@ -73,13 +73,12 @@
     </form>
     <div class="mt-3 flex flex-wrap items-center gap-3 text-xs text-muted">
       <p>{{t "search.help"}}</p>
-      <span
+      <output
         id="search-results-indicator"
         class="htmx-indicator text-muted"
-        role="status"
         aria-live="polite"
         aria-atomic="true"
-      >{{t "search.htmx.loading"}}</span>
+      >{{t "search.htmx.loading"}}</output>
       <span id="search-status-visible" aria-live="off" aria-atomic="true" class="text-muted"></span>
     </div>
   </div>
@@ -146,7 +145,7 @@
       {{if eq .Finding "lifecycle"}}{{if or .AppliedQuery .Severity}} in{{else}} for{{end}} lifecycle findings{{end}}
     </div>
     {{$finding := .Finding}}
-    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="{{t "search.table.label"}}" data-preserve-scroll="search-results-table">
+    <section class="pm-scroll-region" tabindex="0" aria-label="{{t "search.table.label"}}" data-preserve-scroll="search-results-table">
       <table class="min-w-full text-sm">
         <thead>
           <tr class="text-start text-muted border-b bg-bg">
@@ -199,7 +198,7 @@
           {{end}}
         </tbody>
       </table>
-    </div>
+    </section>
     {{if or .PrevURL .NextURL}}
     <div class="px-5 py-3 border-t border-border text-sm text-muted break-words">
       {{if .NextURL}}{{t "search.status.more_available"}}{{else}}{{t "search.pagination.end"}}{{end}}

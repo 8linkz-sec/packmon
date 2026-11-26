@@ -186,9 +186,9 @@ func TestAdminConfigurationQueueFormsUseSubmitLocks(t *testing.T) {
 			path: []string{"templates", "admin", "feeds.html"},
 			wants: []string{
 				`<form action="/admin/feeds/save" method="POST" class="space-y-4" data-submit-lock data-submit-lock-label="{{t "admin.feeds.form.saving"}}">`,
-				`<button type="submit" data-submit-lock-button aria-label="{{t "admin.feeds.form.save_aria" .FeedName}}"`,
+				`<button type="submit" data-submit-lock-button aria-label='{{t "admin.feeds.form.save"}} {{t "admin.feeds.form.save_aria_context" .FeedName}}'`,
 				`<form action="/admin/feeds/reset" method="POST" class="flex justify-start" data-submit-lock data-submit-lock-label="{{t "admin.feeds.reset.saving"}}">`,
-				`<button type="submit" data-submit-lock-button aria-label="{{t "admin.feeds.reset.aria" .FeedName}}"`,
+				`<button type="submit" data-submit-lock-button aria-label='{{t "admin.feeds.reset.button"}} {{t "admin.feeds.reset.aria_context" .FeedName}}'`,
 			},
 		},
 		{
@@ -204,7 +204,7 @@ func TestAdminConfigurationQueueFormsUseSubmitLocks(t *testing.T) {
 			path: []string{"templates", "admin", "queue.html"},
 			wants: []string{
 				`<form action="/admin/queue/priority" method="POST" class="inline-flex items-center gap-2" data-submit-lock data-submit-lock-label="{{t "admin.queue.row.priority.saving"}}">`,
-				`aria-label="{{t "admin.queue.row.priority.save_aria" $job.ID $job.Ecosystem $job.Name}}"`,
+				`aria-label='{{t "admin.queue.row.priority.save"}} {{t "admin.queue.row.priority.save_aria_context" $job.ID $job.Ecosystem $job.Name}}'`,
 				`{{t "admin.queue.row.priority.save"}}</button>`,
 				`<form action="/admin/queue/purge" method="POST" class="inline-flex w-full sm:w-auto" data-submit-lock data-submit-lock-label="{{t "admin.queue.bulk.purging"}}">`,
 				`<form action="/admin/queue/clear" method="POST" class="inline-flex w-full sm:w-auto" data-submit-lock data-submit-lock-label="{{t "admin.queue.bulk.clearing"}}">`,
@@ -451,7 +451,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 		`name="sync_interval"`,
 		`class="pm-form-control"`,
 		`name="api_key"`,
-		`aria-label="{{t "admin.feeds.sync.aria" .FeedName}}"`,
+		`aria-label='{{t "admin.feeds.sync.button"}} {{t "admin.feeds.sync.aria_context" .FeedName}}'`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("admin feed template missing focus token fragment %q", want)
@@ -493,7 +493,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 		},
 		{
 			name:   "save button",
-			marker: `aria-label="{{t "admin.feeds.form.save_aria" .FeedName}}"`,
+			marker: `aria-label='{{t "admin.feeds.form.save"}} {{t "admin.feeds.form.save_aria_context" .FeedName}}'`,
 			wants: []string{
 				`data-submit-lock-button`,
 				`inline-flex`,
@@ -504,7 +504,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 		},
 		{
 			name:   "sync button",
-			marker: `aria-label="{{t "admin.feeds.sync.aria" .FeedName}}"`,
+			marker: `aria-label='{{t "admin.feeds.sync.button"}} {{t "admin.feeds.sync.aria_context" .FeedName}}'`,
 			wants: []string{
 				`inline-flex`,
 				`min-h-8`,
@@ -514,7 +514,7 @@ func TestAdminFeedConfigurationControlsUseFocusToken(t *testing.T) {
 		},
 		{
 			name:   "reset button",
-			marker: `aria-label="{{t "admin.feeds.reset.aria" .FeedName}}"`,
+			marker: `aria-label='{{t "admin.feeds.reset.button"}} {{t "admin.feeds.reset.aria_context" .FeedName}}'`,
 			wants: []string{
 				`data-submit-lock-button`,
 				`inline-flex`,
@@ -2135,8 +2135,8 @@ func TestHTMXFeedbackRegionsExposeLiveAndBusySemantics(t *testing.T) {
 
 	publicFeeds := readTextFile(t, "templates", "feeds.html")
 	for _, want := range []string{
-		`data-auto-refresh-status role="status" aria-live="polite" aria-atomic="true"`,
-		`id="feed-status-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"`,
+		`<output id="feed-status-refresh-state" data-auto-refresh-status aria-live="polite" aria-atomic="true"`,
+		`<output id="feed-status-announcement" class="sr-only" aria-live="polite" aria-atomic="true"`,
 	} {
 		if !strings.Contains(publicFeeds, want) {
 			t.Fatalf("feeds.html missing HTMX live/busy marker %q", want)
@@ -2150,8 +2150,8 @@ func TestHTMXFeedbackRegionsExposeLiveAndBusySemantics(t *testing.T) {
 
 	adminFeeds := readTextFile(t, "templates", "admin", "feeds.html")
 	for _, want := range []string{
-		`data-auto-refresh-status role="status" aria-live="polite" aria-atomic="true"`,
-		`id="admin-feed-runtime-announcement" class="sr-only" role="status" aria-live="polite" aria-atomic="true"`,
+		`<output id="admin-feed-runtime-refresh-state" data-auto-refresh-status aria-live="polite" aria-atomic="true"`,
+		`<output id="admin-feed-runtime-announcement" class="sr-only" aria-live="polite" aria-atomic="true"`,
 		`data-feed-sync-now`,
 	} {
 		if !strings.Contains(adminFeeds, want) {
@@ -2329,7 +2329,7 @@ func ancestorOpeningTagsContaining(t *testing.T, body, tagName, marker string) [
 func assertNotLiveRegion(t *testing.T, tag, name string) {
 	t.Helper()
 
-	for _, blocked := range []string{`aria-live=`, `role="status"`, `role="alert"`} {
+	for _, blocked := range []string{`aria-live=`, `role="status"`, `role="alert"`, `<output`} {
 		if strings.Contains(tag, blocked) {
 			t.Fatalf("%s should not be a live region, found %q in:\n%s", name, blocked, tag)
 		}
@@ -2658,8 +2658,7 @@ func TestAdminAPIKeyCopyHasAccessibleStatusFeedback(t *testing.T) {
 		`data-copy-target="#new-api-key"`,
 		`data-copy-status="#new-api-key-copy-status"`,
 		`aria-describedby="new-api-key-copy-status"`,
-		`id="new-api-key-copy-status"`,
-		`role="status"`,
+		`<output id="new-api-key-copy-status"`,
 		`aria-live="polite"`,
 		`aria-atomic="true"`,
 		`class="sr-only"`,
@@ -2855,7 +2854,7 @@ func TestAdminActionButtonsUseTouchTargets(t *testing.T) {
 			name: "api key copy and generate",
 			path: []string{"templates", "admin", "keys.html"},
 			markers: []string{
-				`aria-label="{{t "admin.keys.copy_aria"}}"`,
+				`aria-label='{{t "admin.keys.copy"}} {{t "admin.keys.copy_aria_context"}}'`,
 				`data-submit-lock-button`,
 			},
 		},
@@ -2870,9 +2869,9 @@ func TestAdminActionButtonsUseTouchTargets(t *testing.T) {
 			name: "feed save sync reset",
 			path: []string{"templates", "admin", "feeds.html"},
 			markers: []string{
-				`aria-label="{{t "admin.feeds.form.save_aria" .FeedName}}"`,
-				`aria-label="{{t "admin.feeds.sync.aria" .FeedName}}"`,
-				`aria-label="{{t "admin.feeds.reset.aria" .FeedName}}"`,
+				`aria-label='{{t "admin.feeds.form.save"}} {{t "admin.feeds.form.save_aria_context" .FeedName}}'`,
+				`aria-label='{{t "admin.feeds.sync.button"}} {{t "admin.feeds.sync.aria_context" .FeedName}}'`,
+				`aria-label='{{t "admin.feeds.reset.button"}} {{t "admin.feeds.reset.aria_context" .FeedName}}'`,
 			},
 		},
 		{
@@ -2920,17 +2919,17 @@ func TestAdminSharedFormActionButtonsUseActiveState(t *testing.T) {
 			path: []string{"templates", "admin", "advisories.html"},
 			markers: []string{
 				`{{if .IsEditing}}{{t "admin.advisories.form.save"}}{{else}}{{t "admin.advisories.form.create"}}{{end}}`,
-				`{{t "admin.advisories.action.confirm_delete_aria" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}`,
+				`{{t "admin.advisories.action.confirm_delete"}} {{t "admin.advisories.action.aria_context" .Advisory.ID .Advisory.Ecosystem .Advisory.Name}}`,
 			},
 		},
 		{
 			name: "api key actions",
 			path: []string{"templates", "admin", "keys.html"},
 			markers: []string{
-				`aria-label="{{t "admin.keys.copy_aria"}}"`,
+				`aria-label='{{t "admin.keys.copy"}} {{t "admin.keys.copy_aria_context"}}'`,
 				`data-submit-lock-button`,
-				`{{t "admin.keys.action.confirm_revoke_aria" .Key.Name .Key.ID}}`,
-				`{{t "admin.keys.action.confirm_delete_aria" .Key.Name .Key.ID}}`,
+				`{{t "admin.keys.action.confirm_revoke"}} {{t "admin.keys.action.confirm_revoke_aria_context" .Key.Name .Key.ID}}`,
+				`{{t "admin.keys.action.confirm_delete"}} {{t "admin.keys.action.confirm_delete_aria_context" .Key.Name .Key.ID}}`,
 			},
 		},
 		{
@@ -2938,9 +2937,9 @@ func TestAdminSharedFormActionButtonsUseActiveState(t *testing.T) {
 			path: []string{"templates", "admin", "feeds.html"},
 			markers: []string{
 				`data-auto-refresh-toggle`,
-				`aria-label="{{t "admin.feeds.form.save_aria" .FeedName}}"`,
-				`aria-label="{{t "admin.feeds.sync.aria" .FeedName}}"`,
-				`aria-label="{{t "admin.feeds.reset.aria" .FeedName}}"`,
+				`aria-label='{{t "admin.feeds.form.save"}} {{t "admin.feeds.form.save_aria_context" .FeedName}}'`,
+				`aria-label='{{t "admin.feeds.sync.button"}} {{t "admin.feeds.sync.aria_context" .FeedName}}'`,
+				`aria-label='{{t "admin.feeds.reset.button"}} {{t "admin.feeds.reset.aria_context" .FeedName}}'`,
 			},
 		},
 		{
@@ -2971,10 +2970,10 @@ func TestAdminQueueRowActionButtonsExposeFocusAndActiveStates(t *testing.T) {
 
 	body := readTextFile(t, "templates", "admin", "queue.html")
 	for _, marker := range []string{
-		`{{t "admin.queue.row.priority.save_aria" $job.ID $job.Ecosystem $job.Name}}`,
-		`{{t "admin.queue.row.pause_aria" $job.ID $job.Ecosystem $job.Name}}`,
-		`{{t "admin.queue.row.resume_aria" $job.ID $job.Ecosystem $job.Name}}`,
-		`{{t "admin.queue.row.retry_aria" $job.ID $job.Ecosystem $job.Name}}`,
+		`{{t "admin.queue.row.priority.save"}} {{t "admin.queue.row.priority.save_aria_context" $job.ID $job.Ecosystem $job.Name}}`,
+		`{{t "admin.queue.row.pause"}} {{t "admin.queue.row.pause_aria_context" $job.ID $job.Ecosystem $job.Name}}`,
+		`{{t "admin.queue.row.resume"}} {{t "admin.queue.row.resume_aria_context" $job.ID $job.Ecosystem $job.Name}}`,
+		`{{t "admin.queue.row.retry"}} {{t "admin.queue.row.retry_aria_context" $job.ID $job.Ecosystem $job.Name}}`,
 	} {
 		tag := openingTagContaining(t, body, marker)
 		for _, want := range []string{
@@ -3261,13 +3260,13 @@ func TestActiveNavigationExposesAriaCurrent(t *testing.T) {
 func TestScrollableTableRegionsUseSemanticSurfaceToken(t *testing.T) {
 	t.Parallel()
 
-	scrollRegion := regexp.MustCompile(`<div\b[^>]*class="[^"]*\bpm-scroll-region\b[^"]*"[^>]*>`)
+	scrollRegion := regexp.MustCompile(`<[a-z]+\b[^>]*class="[^"]*\bpm-scroll-region\b[^"]*"[^>]*>`)
 	for _, path := range allTemplateFiles(t) {
 		body := readTextFile(t, path)
 		for _, tag := range scrollRegion.FindAllString(body, -1) {
 			for _, want := range []string{
+				`<section`,
 				`tabindex="0"`,
-				`role="region"`,
 				`aria-label=`,
 			} {
 				if !strings.Contains(tag, want) {
@@ -3583,8 +3582,8 @@ func TestFeedStatusRefreshControlsExposeRefreshNowAction(t *testing.T) {
 		label string
 		minH  string
 	}{
-		{name: "public feeds", path: []string{"templates", "feeds.html"}, label: `{{t "feeds.refresh.now_aria"}}`, minH: "min-h-8"},
-		{name: "admin feeds", path: []string{"templates", "admin", "feeds.html"}, label: `{{t "admin.feeds.runtime.refresh_now_aria"}}`, minH: "min-h-8"},
+		{name: "public feeds", path: []string{"templates", "feeds.html"}, label: `{{t "feeds.refresh.now"}} {{t "feeds.refresh.now_aria_context"}}`, minH: "min-h-8"},
+		{name: "admin feeds", path: []string{"templates", "admin", "feeds.html"}, label: `{{t "admin.feeds.runtime.refresh_now"}} {{t "admin.feeds.runtime.refresh_now_aria_context"}}`, minH: "min-h-8"},
 	} {
 		t.Run(page.name, func(t *testing.T) {
 			t.Parallel()
@@ -3594,7 +3593,7 @@ func TestFeedStatusRefreshControlsExposeRefreshNowAction(t *testing.T) {
 			for _, want := range []string{
 				`type="button"`,
 				`aria-controls=`,
-				`aria-label="` + page.label + `"`,
+				`aria-label='` + page.label + `'`,
 				`inline-flex`,
 				page.minH,
 			} {
@@ -3855,7 +3854,7 @@ func TestHTMXLiveRegionsUseVisibleIndicators(t *testing.T) {
 			path: []string{"templates", "feeds.html"},
 			wants: []string{
 				`id="feed-status-indicator"`,
-				`role="status"`,
+				`<output`,
 				`aria-live="polite"`,
 				`hx-indicator="#feed-status-indicator"`,
 				`data-htmx-status-target="#feed-status-refresh-state"`,
@@ -3868,7 +3867,7 @@ func TestHTMXLiveRegionsUseVisibleIndicators(t *testing.T) {
 			path: []string{"templates", "admin", "feeds.html"},
 			wants: []string{
 				`id="admin-feed-runtime-indicator"`,
-				`role="status"`,
+				`<output`,
 				`aria-live="polite"`,
 				`hx-indicator="#admin-feed-runtime-indicator"`,
 				`data-htmx-status-target="#admin-feed-runtime-refresh-state"`,
@@ -3881,7 +3880,7 @@ func TestHTMXLiveRegionsUseVisibleIndicators(t *testing.T) {
 			path: []string{"templates", "search.html"},
 			wants: []string{
 				`id="search-results-indicator"`,
-				`role="status"`,
+				`<output`,
 				`aria-live="polite"`,
 				`hx-indicator="#search-results-indicator"`,
 				`data-htmx-status-target="#search-status-visible"`,
@@ -3910,7 +3909,7 @@ func TestSearchLiveSearchDoesNotAnnounceDebouncedResultCounts(t *testing.T) {
 
 	search := readTextFile(t, "templates", "search.html")
 	visibleStatusTag := openingTagContaining(t, search, `id="search-status-visible"`)
-	for _, blocked := range []string{`role="status"`, `role="alert"`, `aria-live="polite"`, `aria-live="assertive"`} {
+	for _, blocked := range []string{`role="status"`, `role="alert"`, `aria-live="polite"`, `aria-live="assertive"`, `<output`} {
 		if strings.Contains(visibleStatusTag, blocked) {
 			t.Fatalf("search visible status should not announce every debounced refresh, found %q in:\n%s", blocked, visibleStatusTag)
 		}
@@ -3920,7 +3919,7 @@ func TestSearchLiveSearchDoesNotAnnounceDebouncedResultCounts(t *testing.T) {
 	}
 
 	searchStatusTag := openingTagContaining(t, search, `id="search-status"`)
-	for _, blocked := range []string{`role="status"`, `aria-live="polite"`} {
+	for _, blocked := range []string{`role="status"`, `aria-live="polite"`, `<output`} {
 		if strings.Contains(searchStatusTag, blocked) {
 			t.Fatalf("search result-count status should not be a polite live region during live search, found %q in:\n%s", blocked, searchStatusTag)
 		}

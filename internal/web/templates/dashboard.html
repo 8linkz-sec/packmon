@@ -69,7 +69,7 @@
   <div class="pm-surface p-5">
     <h2 class="text-lg font-semibold mb-3">{{t "dashboard.recent_vulnerabilities.heading"}}</h2>
     {{if .RecentVulnerabilities}}
-    <div class="pm-scroll-region" tabindex="0" role="region" aria-label="{{t "dashboard.recent_vulnerabilities.table"}}">
+    <section class="pm-scroll-region" tabindex="0" aria-label="{{t "dashboard.recent_vulnerabilities.table"}}">
       <table class="min-w-full text-sm" data-dashboard-recent-table>
         <thead>
           <tr class="text-start text-muted border-b border-border">
@@ -109,9 +109,8 @@
                 href="{{$advisoryURL}}"
                 target="_blank"
                 rel="noopener"
-                aria-label="{{newTabAriaLabel (t "dashboard.advisory_label" .ID)}}"
                 class="text-accent hover:underline"
-              ><bdi dir="auto">{{.ID}}</bdi>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
+              ><bdi dir="auto">{{.ID}}</bdi><span class="sr-only"> {{t "dashboard.advisory_suffix"}}</span>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
               {{else}}
               <bdi dir="auto">{{.ID}}</bdi>
               {{end}}
@@ -121,7 +120,7 @@
           {{end}}
         </tbody>
       </table>
-    </div>
+    </section>
     {{else}}
     <p class="text-sm text-muted">{{t "dashboard.recent_vulnerabilities.empty"}}</p>
     {{end}}

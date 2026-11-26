@@ -95,7 +95,7 @@ func TestAdminFeedRuntimeUsesResponsiveScannableLayouts(t *testing.T) {
 	for _, want := range []string{
 		`hidden`,
 		`md:block`,
-		`role="region"`,
+		`<section`,
 		`aria-label="{{t "admin.feeds.runtime.table_aria"}}"`,
 		`data-preserve-scroll="admin-feed-runtime-table"`,
 	} {

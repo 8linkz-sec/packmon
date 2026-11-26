@@ -1442,7 +1442,16 @@ the middle of a code point; CLI/server response snippets follow the same
 user-visible truncation rule.
 Horizontally scrollable table regions in the web UI and generated HTML reports
 must be keyboard-focusable, have an accessible name, and show a visible focus
-indicator. Feed-status auto-refresh must preserve the horizontal scroll
+indicator. Web UI templates use the native element instead of the equivalent
+ARIA role: named scroll regions are `<section aria-label>`, live status text is
+`<output>`, and labelled control groups are `<fieldset aria-label>`. An
+`aria-label` on a link or button that also shows a visible label is composed
+from that same message (`aria-label='{{t "visible"}} {{t "context"}}'`), so the
+accessible name always contains the visible label;
+`internal/web/template_markup_semantics_test.go` enforces both rules and keeps
+the SonarQube Web:S6845 exception in `sonar-project.properties` limited to the
+template files whose focusable non-interactive elements are scrollable
+regions. Feed-status auto-refresh must preserve the horizontal scroll
 position of refreshed table regions so operators can inspect right-side columns
 without being reset to the first column on every htmx swap.
 Meaningful status, helper, empty-state, and badge text must use contrast-safe
@@ -1754,7 +1763,9 @@ runner, scans each image with Trivy, and blocks on HIGH or CRITICAL
 vulnerabilities that have a fixed version and on secrets in the image;
 unfixed vulnerabilities only reach Dependency-Track, where each image gets its
 own project under the repository's project. Accepted findings would go into
-`.trivyignore` with a reason. It is a development pipeline for Packmon
+`.trivyignore` with a reason; accepted SonarQube findings go into
+`sonar-project.properties` with their reason (the scanner reads it next to the
+`SONAR_EXTRA_ARGS` scope options). It is a development pipeline for Packmon
 itself, not a Packmon scan, and it does not run `ci/gitlab/.packmon-scan.yml`.
 
 Packmon overrides three template jobs. `go-test` and `go-test-race` first

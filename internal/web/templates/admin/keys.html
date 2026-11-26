@@ -28,7 +28,7 @@
       >
       <button
         type="button"
-        aria-label="{{t "admin.keys.copy_aria"}}"
+        aria-label='{{t "admin.keys.copy"}} {{t "admin.keys.copy_aria_context"}}'
         aria-describedby="new-api-key-copy-status"
         data-copy-target="#new-api-key"
         data-copy-status="#new-api-key-copy-status"
@@ -36,7 +36,7 @@
       >
         {{t "admin.keys.copy"}}
       </button>
-      <span id="new-api-key-copy-status" role="status" aria-live="polite" aria-atomic="true" class="sr-only"></span>
+      <output id="new-api-key-copy-status" aria-live="polite" aria-atomic="true" class="sr-only"></output>
     </div>
   {{template "admin-alert-end" .}}
   </div>
@@ -189,10 +189,9 @@
       </div>
       {{end}}
     </div>
-    <div
+    <section
       class="hidden md:block pm-scroll-region"
       tabindex="0"
-      role="region"
       aria-label="API keys table"
       data-admin-desktop-table="keys"
     >
@@ -242,7 +241,7 @@
           {{end}}
         </tbody>
       </table>
-    </div>
+    </section>
     {{else}}
     <div class="pm-empty-state">
       <p class="text-sm font-medium text-fg">No API keys created yet.</p>
@@ -288,7 +287,7 @@
       <button
         type="submit"
         data-submit-lock-button
-        aria-label="{{t "admin.keys.action.confirm_revoke_aria" .Key.Name .Key.ID}}"
+        aria-label='{{t "admin.keys.action.confirm_revoke"}} {{t "admin.keys.action.confirm_revoke_aria_context" .Key.Name .Key.ID}}'
         class="{{adminDangerButtonClass}}"
       >
         {{t "admin.keys.action.confirm_revoke"}}
@@ -318,7 +317,7 @@
       <button
         type="submit"
         data-submit-lock-button
-        aria-label="{{t "admin.keys.action.confirm_delete_aria" .Key.Name .Key.ID}}"
+        aria-label='{{t "admin.keys.action.confirm_delete"}} {{t "admin.keys.action.confirm_delete_aria_context" .Key.Name .Key.ID}}'
         class="{{adminDangerButtonClass}}"
       >
         {{t "admin.keys.action.confirm_delete"}}
