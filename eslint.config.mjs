@@ -6,6 +6,7 @@ const browserGlobals = {
   localStorage: "readonly",
   navigator: "readonly",
   Number: "readonly",
+  URL: "readonly",
   window: "readonly",
 };
 
@@ -28,6 +29,9 @@ export default [
   {
     files: [
       "internal/web/static/auto-refresh.js",
+      "internal/web/static/form-actions.js",
+      "internal/web/static/htmx-regions.js",
+      "internal/web/static/locale-format.js",
       "internal/web/static/theme-init.js",
     ],
     languageOptions: {
