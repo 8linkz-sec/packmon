@@ -14,10 +14,13 @@ import (
 	"github.com/8linkz-sec/packmon/internal/logsafe"
 )
 
+// cyclonedxNPMTool is the npm SBOM generator command.
+const cyclonedxNPMTool = "cyclonedx-npm"
+
 type npmGenerator struct{}
 
 func (npmGenerator) Ecosystem() domain.Ecosystem { return domain.EcosystemNPM }
-func (npmGenerator) Tool() string                { return "cyclonedx-npm" }
+func (npmGenerator) Tool() string                { return cyclonedxNPMTool }
 func (npmGenerator) InstallSpec() InstallSpec {
 	return InstallSpec{
 		Package:         "@cyclonedx/cyclonedx-npm",
@@ -41,7 +44,7 @@ func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, o
 	if !opts.IncludeDev {
 		args = append(args, "--omit", "dev")
 	}
-	out, err := run(ctx, RunOptions{Name: "cyclonedx-npm", Args: npmManifestArgs(args, d.ManifestPath)})
+	out, err := run(ctx, RunOptions{Name: cyclonedxNPMTool, Args: npmManifestArgs(args, d.ManifestPath)})
 	if err == nil {
 		return nil
 	}
@@ -55,7 +58,7 @@ func (npmGenerator) Generate(ctx context.Context, d Detection, outPath string, o
 	// them in the lockfile. Only that case is retried ignoring npm errors, and
 	// the reported problems are logged so the gap stays visible.
 	retryArgs := npmManifestArgs(append(append([]string(nil), args...), "--ignore-npm-errors"), d.ManifestPath)
-	retryOut, retryErr := run(ctx, RunOptions{Name: "cyclonedx-npm", Args: retryArgs})
+	retryOut, retryErr := run(ctx, RunOptions{Name: cyclonedxNPMTool, Args: retryArgs})
 	if retryErr != nil {
 		return fmt.Errorf("cyclonedx-npm: %w: %s; retry with --ignore-npm-errors: %w: %s",
 			err, commandOutputSummary(out), retryErr, commandOutputSummary(retryOut))

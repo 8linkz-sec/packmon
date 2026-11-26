@@ -71,10 +71,10 @@ func newDBSyncCmd() *cobra.Command {
 	f.BoolVar(&flagFull, "full", false, "full sync instead of incremental")
 	f.StringVar(&flagSource, "source", "server", "sync source (server)")
 	f.StringVar(&flagServer, "server", "", "feed server URL")
-	f.StringVar(&flagAPIKey, "api-key", "", "deprecated: use PACKMON_API_KEY or api_key_env; command-line secrets are rejected by default")
+	f.StringVar(&flagAPIKey, apiKeyFlagName, "", "deprecated: use PACKMON_API_KEY or api_key_env; command-line secrets are rejected by default")
 	f.IntVar(&flagTimeout, "timeout", 60, "sync timeout in seconds")
 	f.StringVar(&flagCACert, "cacert", "", "path to a PEM CA bundle used to verify the server's TLS certificate")
-	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
+	f.BoolVar(&flagInsecureHTTP, insecureAllowHTTPFlagName, false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 
 	return cmd
 }
@@ -180,12 +180,12 @@ func resolveDBSyncSettings(cmd *cobra.Command, cfg *cliConfig) (dbSyncSettings, 
 	if settings.serverURL == "" {
 		return dbSyncSettings{}, fmt.Errorf("missing server URL (use --server, PACKMON_SERVER, user-global config, or explicit --config)")
 	}
-	if err := rejectSecretFlagValue(cmd, "api-key", "PACKMON_API_KEY or config api_key_env"); err != nil {
+	if err := rejectSecretFlagValue(cmd, apiKeyFlagName, "PACKMON_API_KEY or config api_key_env"); err != nil {
 		return dbSyncSettings{}, err
 	}
 
 	envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
-	skipConfigAPIKeyEnv := envAPIKey != "" || commandFlagChanged(cmd, "api-key")
+	skipConfigAPIKeyEnv := envAPIKey != "" || commandFlagChanged(cmd, apiKeyFlagName)
 	if cfg != nil && cfg.APIKey != "" {
 		settings.apiKey = cfg.APIKey
 	}
@@ -199,8 +199,8 @@ func resolveDBSyncSettings(cmd *cobra.Command, cfg *cliConfig) (dbSyncSettings, 
 	if envAPIKey != "" {
 		settings.apiKey = envAPIKey
 	}
-	if commandFlagChanged(cmd, "api-key") {
-		settings.apiKey, err = dbSyncTrimmedStringFlag(cmd, "api-key")
+	if commandFlagChanged(cmd, apiKeyFlagName) {
+		settings.apiKey, err = dbSyncTrimmedStringFlag(cmd, apiKeyFlagName)
 		if err != nil {
 			return dbSyncSettings{}, err
 		}
@@ -229,8 +229,8 @@ func resolveDBSyncSettings(cmd *cobra.Command, cfg *cliConfig) (dbSyncSettings, 
 		}
 		settings.allowInsecureHTTP = parsed
 	}
-	if commandFlagChanged(cmd, "insecure-allow-http") {
-		settings.allowInsecureHTTP, err = dbSyncBoolFlag(cmd, "insecure-allow-http", false)
+	if commandFlagChanged(cmd, insecureAllowHTTPFlagName) {
+		settings.allowInsecureHTTP, err = dbSyncBoolFlag(cmd, insecureAllowHTTPFlagName, false)
 		if err != nil {
 			return dbSyncSettings{}, err
 		}

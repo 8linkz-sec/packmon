@@ -10,6 +10,11 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
+const (
+	githubHost      = "github.com"
+	rustsecIDPrefix = "RUSTSEC-"
+)
+
 // Link is a clickable advisory or resource link prepared for CLI and web
 // rendering.
 type Link struct {
@@ -59,7 +64,7 @@ var vulnerabilityResourceRules = []vulnerabilityResourceRule{
 	{
 		label: "GHSA",
 		matches: func(ctx vulnerabilityResourceContext) bool {
-			return ctx.host == "github.com" && strings.Contains(ctx.path, "/security/advisories/")
+			return ctx.host == githubHost && strings.Contains(ctx.path, "/security/advisories/")
 		},
 		score: func(ctx vulnerabilityResourceContext) int {
 			if ghsaID := ghsaIDPattern.FindString(ctx.safeURL); strings.EqualFold(ghsaID, ctx.advisoryID) {
@@ -101,7 +106,7 @@ var vulnerabilityResourceRules = []vulnerabilityResourceRule{
 	{
 		label: "GitHub",
 		matches: func(ctx vulnerabilityResourceContext) bool {
-			return ctx.host == "github.com"
+			return ctx.host == githubHost
 		},
 	},
 }
@@ -139,7 +144,7 @@ func AdvisoryURL(f domain.Finding) string {
 		return "https://github.com/advisories/" + advisoryID
 	case strings.HasPrefix(advisoryIDUpper, "CVE-"):
 		return "https://nvd.nist.gov/vuln/detail/" + advisoryID
-	case strings.HasPrefix(advisoryIDUpper, "RUSTSEC-"):
+	case strings.HasPrefix(advisoryIDUpper, rustsecIDPrefix):
 		return "https://rustsec.org/advisories/" + advisoryID + ".html"
 	}
 
@@ -283,7 +288,7 @@ func CanonicalVulnerabilityResource(advisoryID string) (domain.ResourceLink, int
 	switch {
 	case strings.HasPrefix(advisoryID, "GHSA-"):
 		return domain.ResourceLink{Label: "GHSA", URL: "https://github.com/advisories/" + advisoryID}, 5, true
-	case strings.HasPrefix(advisoryID, "RUSTSEC-"):
+	case strings.HasPrefix(advisoryID, rustsecIDPrefix):
 		return domain.ResourceLink{Label: "RustSec", URL: "https://rustsec.org/advisories/" + advisoryID + ".html"}, 5, true
 	case strings.HasPrefix(advisoryID, "CVE-"):
 		return domain.ResourceLink{Label: "NVD", URL: "https://nvd.nist.gov/vuln/detail/" + advisoryID}, 5, true
@@ -425,7 +430,7 @@ func isGenericReferenceLandingPage(host string, parsed *url.URL) bool {
 		return true
 	}
 
-	if host == "github.com" && parsed.RawQuery == "" && parsed.Fragment == "" {
+	if host == githubHost && parsed.RawQuery == "" && parsed.Fragment == "" {
 		segments := strings.Split(path, "/")
 		if len(segments) == 2 && segments[0] != "" && segments[1] != "" && segments[0] != "advisories" {
 			return true
@@ -454,7 +459,7 @@ func ResourceScore(advisoryID, label string) int {
 	switch {
 	case strings.HasPrefix(advisoryID, "GHSA-"):
 		preferred = "GHSA"
-	case strings.HasPrefix(advisoryID, "RUSTSEC-"):
+	case strings.HasPrefix(advisoryID, rustsecIDPrefix):
 		preferred = "RustSec"
 	case strings.HasPrefix(advisoryID, "CVE-"):
 		preferred = "NVD"

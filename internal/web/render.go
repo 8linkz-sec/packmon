@@ -31,7 +31,12 @@ type Renderer struct {
 	dev   bool // when true, templates are reloaded on every render
 }
 
-const staticAssetVersionLength = 16
+const (
+	staticAssetVersionLength = 16
+	staticPathPrefix         = "static/"
+	// auditLogFailedMessage is the catalog text of every audit-log write failure.
+	auditLogFailedMessage = "Failed to record audit log"
+)
 
 // LayoutLinks are optional operator-facing links rendered by the shared layout.
 type LayoutLinks struct {
@@ -372,19 +377,19 @@ func normalizeStaticAssetFSPath(assetPath string) (string, bool) {
 	if raw == "" {
 		return "", false
 	}
-	hasStaticPrefix := strings.HasPrefix(raw, "static/")
+	hasStaticPrefix := strings.HasPrefix(raw, staticPathPrefix)
 	clean := path.Clean(raw)
 	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
 		return "", false
 	}
 	if hasStaticPrefix {
-		if !strings.HasPrefix(clean, "static/") {
+		if !strings.HasPrefix(clean, staticPathPrefix) {
 			return "", false
 		}
 	} else {
 		clean = path.Join("static", clean)
 	}
-	if clean == "static" || !strings.HasPrefix(clean, "static/") || !fs.ValidPath(clean) {
+	if clean == "static" || !strings.HasPrefix(clean, staticPathPrefix) || !fs.ValidPath(clean) {
 		return "", false
 	}
 	return clean, true
@@ -931,7 +936,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.settings.error.invalid_admin_audit_retention"): "Invalid admin audit retention",
 	webMessageKey("admin.settings.error.invalid_revision"):              "Invalid system settings revision",
 	webMessageKey("admin.settings.error.conflict"):                      "System settings changed while you were editing. Reload and try again.",
-	webMessageKey("admin.settings.error.audit_log"):                     "Failed to record audit log",
+	webMessageKey("admin.settings.error.audit_log"):                     auditLogFailedMessage,
 	webMessageKey("admin.settings.error.save"):                          "Failed to save system settings",
 	webMessageKey("admin.settings.flash.saved"):                         "System settings saved and applied.",
 	webMessageKey("admin.settings.error.password.too_many_attempts"):    "Too many failed password attempts. Please try again later.",
@@ -990,7 +995,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.keys.error.generate"):                          "Failed to generate key",
 	webMessageKey("admin.keys.error.create"):                            "Failed to create API key",
 	webMessageKey("admin.keys.error.create_expired"):                    "Key creation request expired. Reload the page and try again.",
-	webMessageKey("admin.keys.error.audit_log"):                         "Failed to record audit log",
+	webMessageKey("admin.keys.error.audit_log"):                         auditLogFailedMessage,
 	webMessageKey("admin.keys.error.too_many_attempts"):                 "Too many failed password attempts. Please try again later.",
 	webMessageKey("admin.keys.error.verify_current_password"):           "Failed to verify current password",
 	webMessageKey("admin.keys.error.current_password_incorrect"):        "Current password is incorrect",
@@ -1115,7 +1120,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.feeds.error.apply_unavailable"):                "Feed configuration was not saved because runtime apply is unavailable",
 	webMessageKey("admin.feeds.error.save_conflict"):                    "Feed configuration changed while you were editing",
 	webMessageKey("admin.feeds.error.invalid_revision"):                 "Invalid feed configuration revision",
-	webMessageKey("admin.feeds.error.audit_log"):                        "Failed to record audit log",
+	webMessageKey("admin.feeds.error.audit_log"):                        auditLogFailedMessage,
 	webMessageKey("admin.feeds.error.save_persist"):                     "Failed to save feed configuration",
 	webMessageKey("admin.feeds.error.unknown_feed"):                     "Unknown feed",
 	webMessageKey("admin.feeds.error.confirm_reset"):                    "Confirm feed configuration reset",
@@ -1170,7 +1175,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.advisories.error.generate_id"):                 "Failed to generate advisory ID",
 	webMessageKey("admin.advisories.error.id_prefix"):                   "Advisory ID must start with manual:",
 	webMessageKey("admin.advisories.error.save_default"):                "Manual advisory could not be saved",
-	webMessageKey("admin.advisories.error.audit_log"):                   "Failed to record audit log",
+	webMessageKey("admin.advisories.error.audit_log"):                   auditLogFailedMessage,
 	webMessageKey("admin.advisories.error.conflict"):                    "Advisory changed while you were editing. Reload and apply your changes again.",
 	webMessageKey("admin.advisories.error.update"):                      "Failed to update advisory",
 	webMessageKey("admin.advisories.error.create"):                      "Failed to create advisory",
@@ -1217,7 +1222,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("admin.queue.bulk.no_clear"):                          "No %s queue jobs to clear.",
 	webMessageKey("admin.queue.error.stats_load"):                       "Queue stats could not be loaded. Check the server logs and database connection before relying on these counters.",
 	webMessageKey("admin.queue.error.jobs_load"):                        "Queue jobs could not be loaded. Check the server logs and database connection before changing queue state.",
-	webMessageKey("admin.queue.error.audit_log"):                        "Failed to record audit log",
+	webMessageKey("admin.queue.error.audit_log"):                        auditLogFailedMessage,
 	webMessageKey("admin.queue.error.purge"):                            "Purge failed",
 	webMessageKey("admin.queue.flash.purged"):                           "Purged %d %s.",
 	webMessageKey("admin.queue.error.invalid_priority"):                 "Invalid priority",

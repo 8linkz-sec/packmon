@@ -30,6 +30,10 @@ const (
 	// DefaultAdminIdleTimeout is the server-side inactivity timeout used when
 	// PACKMON_ADMIN_IDLE_TIMEOUT is not set.
 	DefaultAdminIdleTimeout = 15 * time.Minute
+
+	// defaultMetricsHost is the metrics listen host when PACKMON_METRICS_HOST
+	// is unset or blank.
+	defaultMetricsHost = "127.0.0.1"
 )
 
 // ScanLogIdentityMode controls which identity-adjacent fields are retained in
@@ -530,7 +534,7 @@ func loadMetricsConfig() (MetricsConfig, error) {
 		return MetricsConfig{}, err
 	}
 	return MetricsConfig{
-		Host: envOrDefault("PACKMON_METRICS_HOST", "127.0.0.1"),
+		Host: envOrDefault("PACKMON_METRICS_HOST", defaultMetricsHost),
 		Port: metricsPort,
 	}, nil
 }
@@ -893,7 +897,7 @@ func loadFeedProviderConfig() (FeedsConfig, error) {
 func (m MetricsConfig) Addr() string {
 	host := strings.TrimSpace(m.Host)
 	if host == "" {
-		host = "127.0.0.1"
+		host = defaultMetricsHost
 	}
 	return net.JoinHostPort(host, strconv.Itoa(m.Port))
 }
@@ -942,7 +946,7 @@ func (c *Config) ValidateMetricsExposure() error {
 	}
 	host := strings.TrimSpace(c.Metrics.Host)
 	if host == "" {
-		host = "127.0.0.1"
+		host = defaultMetricsHost
 	}
 	if netutil.IsLoopbackHost(host) {
 		return nil

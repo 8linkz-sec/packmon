@@ -16,8 +16,16 @@ import (
 // hookMarker identifies a packmon-managed hook file.
 const hookMarker = "# packmon managed hook"
 
+const (
+	hookTypePrePush   = "pre-push"
+	hookTypePreCommit = "pre-commit"
+	// notInGitRepositoryMessage is printed when a hook command runs outside a
+	// Git work tree.
+	notInGitRepositoryMessage = "Not in a git repository."
+)
+
 // hookTypes lists the hook types packmon can manage.
-var hookTypes = []string{"pre-push", "pre-commit"}
+var hookTypes = []string{hookTypePrePush, hookTypePreCommit}
 
 // hookScript returns the shell script content for a packmon Git hook.
 func hookScript(failOn string) string {
@@ -172,7 +180,7 @@ func newHookInstallCmd() *cobra.Command {
 			}
 
 			// Validate hook type.
-			if hookType != "pre-push" && hookType != "pre-commit" {
+			if hookType != hookTypePrePush && hookType != hookTypePreCommit {
 				fmt.Fprintf(os.Stderr, "Error: unsupported hook type %q (use pre-push or pre-commit)\n", hookType)
 				os.Exit(ExitOperational)
 			}
@@ -185,7 +193,7 @@ func newHookInstallCmd() *cobra.Command {
 
 			root := findGitRoot(cwd)
 			if root == "" {
-				fmt.Println("Not in a git repository.")
+				fmt.Println(notInGitRepositoryMessage)
 				return nil
 			}
 
@@ -265,7 +273,7 @@ func hookFileExecutable(mode os.FileMode, goos string) bool {
 }
 
 func hookDefaultsFromConfig() (hookType, failOn string, err error) {
-	hookType = "pre-push"
+	hookType = hookTypePrePush
 	failOn = "CRITICAL"
 	cfg, _, err := loadCurrentCLIConfig()
 	if err != nil {
@@ -298,7 +306,7 @@ func newHookUninstallCmd() *cobra.Command {
 
 			root := findGitRoot(cwd)
 			if root == "" {
-				fmt.Println("Not in a git repository.")
+				fmt.Println(notInGitRepositoryMessage)
 				return nil
 			}
 
@@ -345,7 +353,7 @@ func newHookStatusCmd() *cobra.Command {
 
 			root := findGitRoot(cwd)
 			if root == "" {
-				fmt.Println("Not in a git repository.")
+				fmt.Println(notInGitRepositoryMessage)
 				return nil
 			}
 

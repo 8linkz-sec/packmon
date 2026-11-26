@@ -10,6 +10,10 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+// pipIndexURLOption is the pip requirements option that replaces the package
+// index.
+const pipIndexURLOption = "--index-url"
+
 // ---------------------------------------------------------------------------
 // Pipfile.lock (pipenv)
 // ---------------------------------------------------------------------------
@@ -316,7 +320,7 @@ func shouldSkipRequirementLine(line string) bool {
 		return true
 	}
 	switch fields[0] {
-	case "-r", "--requirement", "-c", "--constraint", "-i", "--index-url",
+	case "-r", "--requirement", "-c", "--constraint", "-i", pipIndexURLOption,
 		"--extra-index-url", "--find-links", "-f", "--trusted-host",
 		"--no-index", "--pre":
 		return true
@@ -335,7 +339,7 @@ func updateRequirementSourceRefs(line string, current []string) []string {
 		return current
 	}
 	switch fields[0] {
-	case "-i", "--index-url":
+	case "-i", pipIndexURLOption:
 		if len(fields) > 1 {
 			return cleanSourceRefs(fields[1])
 		}
@@ -352,7 +356,7 @@ func updateRequirementSourceRefs(line string, current []string) []string {
 			if value == "" {
 				return current
 			}
-			if strings.HasPrefix(prefix, "--index-url") || strings.HasPrefix(prefix, "-i") {
+			if strings.HasPrefix(prefix, pipIndexURLOption) || strings.HasPrefix(prefix, "-i") {
 				return cleanSourceRefs(value)
 			}
 			return cleanSourceRefs(append(append([]string(nil), current...), value)...)

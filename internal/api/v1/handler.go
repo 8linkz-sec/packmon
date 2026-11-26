@@ -33,6 +33,12 @@ import (
 )
 
 const (
+	// invalidRequestBodyPrefix starts the 400 response text of a body that
+	// fails to decode.
+	invalidRequestBodyPrefix = "invalid request body: "
+	// sha256DigestPrefix marks a hex SHA-256 digest.
+	sha256DigestPrefix = "sha256:"
+
 	// maxRequestBody is the standard JSON request cap retained for endpoints
 	// other than /check.
 	maxRequestBody int64 = checkcontract.MaxPackagesPerCheck*(checkcontract.MaxPackageNameUTF8Bytes+checkcontract.MaxPackageVersionUTF8Bytes+128) + 1024
@@ -457,7 +463,7 @@ func (h *Handler) parseCheckRequest(w http.ResponseWriter, r *http.Request, corr
 	}
 	if err := readJSONWithLimit(r, &wireReq, maxCheckRequestBody); err != nil {
 		h.logger.Warn("invalid check request body", "error", err, "correlation_id", correlationID)
-		errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+		errorResponseForRequest(w, r, http.StatusBadRequest, invalidRequestBodyPrefix+err.Error())
 		return checkRequestParts{}, false
 	}
 
@@ -1041,7 +1047,7 @@ func scanLogIdempotencyKey(raw string) string {
 		return ""
 	}
 	sum := sha256.Sum256([]byte("packmon scan-log idempotency key v1\x00" + raw))
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return sha256DigestPrefix + hex.EncodeToString(sum[:])
 }
 
 func checkRequestDigest(req *domain.ScanRequest) (string, error) {
@@ -1056,7 +1062,7 @@ func checkRequestDigest(req *domain.ScanRequest) (string, error) {
 		return "", err
 	}
 	sum := sha256.Sum256(body)
-	return "sha256:" + hex.EncodeToString(sum[:]), nil
+	return sha256DigestPrefix + hex.EncodeToString(sum[:]), nil
 }
 
 func scanIDForIdempotencyKey(key, requestDigest string) string {
@@ -1384,7 +1390,7 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 	present, err := refreshBodyPresent(r)
 	if err != nil {
 		h.logger.Warn("invalid refresh request body", "error", err, "correlation_id", correlationID)
-		errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+		errorResponseForRequest(w, r, http.StatusBadRequest, invalidRequestBodyPrefix+err.Error())
 		return
 	}
 	if present {
@@ -1398,7 +1404,7 @@ func (h *Handler) handleRefresh(w http.ResponseWriter, r *http.Request, ecosyste
 		var req *struct{}
 		if err := readJSON(r, &req); err != nil {
 			h.logger.Warn("invalid refresh request body", "error", err, "correlation_id", correlationID)
-			errorResponseForRequest(w, r, http.StatusBadRequest, "invalid request body: "+err.Error())
+			errorResponseForRequest(w, r, http.StatusBadRequest, invalidRequestBodyPrefix+err.Error())
 			return
 		}
 		if req == nil {
@@ -1643,7 +1649,7 @@ func encodeJSONResponse(v any) ([]byte, error) {
 
 func scanResultDigest(body []byte) string {
 	sum := sha256.Sum256(body)
-	return "sha256:" + hex.EncodeToString(sum[:])
+	return sha256DigestPrefix + hex.EncodeToString(sum[:])
 }
 
 // generateID returns a random 8-byte hex string (16 characters) for scan IDs.

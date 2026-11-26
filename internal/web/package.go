@@ -19,6 +19,8 @@ const (
 	maxPackageDetailNameLength    = 512
 	maxPackageDetailVersionLength = 256
 	packageDetailFindingLimit     = 20
+	// advisoryLabelSuffix turns a source name into an advisory link label.
+	advisoryLabelSuffix = " advisory"
 )
 
 // PackageData is the view model for the package detail template.
@@ -478,7 +480,7 @@ func packageRiskTypeDefinitionsFor(findings packageFindings) []RiskTypeDefinitio
 
 func packageFindingFallbackResourceLabel(f domain.Finding) string {
 	if advisorySource := packageFindingAdvisorySourceLabel(f.AdvisoryID); advisorySource != "" {
-		return advisorySource + " advisory"
+		return advisorySource + advisoryLabelSuffix
 	}
 
 	source := packageFindingSourceLabel(f.Source)
@@ -523,18 +525,18 @@ func packageFindingFallbackResourceLabel(f domain.Finding) string {
 		return "Lifecycle report"
 	case domain.FindingTypeVulnerability:
 		if source != "" {
-			return source + " advisory"
+			return source + advisoryLabelSuffix
 		}
 		if target != "" {
-			return target + " advisory"
+			return target + advisoryLabelSuffix
 		}
 	}
 
 	if source != "" {
-		return source + " advisory"
+		return source + advisoryLabelSuffix
 	}
 	if target != "" {
-		return target + " advisory"
+		return target + advisoryLabelSuffix
 	}
 	return "Finding advisory"
 }

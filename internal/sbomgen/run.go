@@ -15,7 +15,12 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
-const defaultGenerationTimeout = 2 * time.Minute
+const (
+	defaultGenerationTimeout = 2 * time.Minute
+	// sbomFileExtension ends every generated CycloneDX JSON file name.
+	sbomFileExtension             = ".cdx.json"
+	installingGeneratorLogMessage = "installing SBOM generator"
+)
 
 // Config controls auto-SBOM detection, generation, validation, and optional
 // tool installation.
@@ -227,7 +232,7 @@ func outputFileName(d Detection) string {
 	if strings.TrimSpace(name) == "" {
 		name = string(d.Ecosystem)
 	}
-	return name + ".cdx.json"
+	return name + sbomFileExtension
 }
 
 func uniqueOutputFileName(d Detection, used map[string]int, tag string) string {
@@ -237,7 +242,7 @@ func uniqueOutputFileName(d Detection, used map[string]int, tag string) string {
 	if count == 0 {
 		return name
 	}
-	base := strings.TrimSuffix(name, ".cdx.json")
+	base := strings.TrimSuffix(name, sbomFileExtension)
 	return fmt.Sprintf("%s-%d.cdx.json", base, count+1)
 }
 
@@ -247,8 +252,8 @@ func taggedOutputFileName(d Detection, tag string) string {
 	if tag == "" {
 		return name
 	}
-	base := strings.TrimSuffix(name, ".cdx.json")
-	return base + "-" + tag + ".cdx.json"
+	base := strings.TrimSuffix(name, sbomFileExtension)
+	return base + "-" + tag + sbomFileExtension
 }
 
 func sbomSnapshotTag(t time.Time) string {
@@ -340,7 +345,7 @@ func ensureTool(ctx context.Context, cfg Config, gen Generator) error {
 	displayArgs := append([]string{installer}, installArgs...)
 
 	if cfg.Logger != nil {
-		cfg.Logger.Info("installing SBOM generator", "package", spec.Package, "source", spec.Source, "command", strings.Join(displayArgs, " "))
+		cfg.Logger.Info(installingGeneratorLogMessage, "package", spec.Package, "source", spec.Source, "command", strings.Join(displayArgs, " "))
 	}
 	installCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
@@ -367,7 +372,7 @@ func installPythonPackageTool(ctx context.Context, cfg Config, spec InstallSpec,
 		return fmt.Errorf("create Python tool cache: %w", err)
 	}
 	if cfg.Logger != nil {
-		cfg.Logger.Info("installing SBOM generator", "package", spec.Package, "source", spec.Source, "command", strings.Join([]string{python, "-m", "venv", venvDir}, " "))
+		cfg.Logger.Info(installingGeneratorLogMessage, "package", spec.Package, "source", spec.Source, "command", strings.Join([]string{python, "-m", "venv", venvDir}, " "))
 	}
 	installCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
@@ -379,7 +384,7 @@ func installPythonPackageTool(ctx context.Context, cfg Config, spec InstallSpec,
 	venvPython := pythonToolVenvPython(venvDir)
 	pkg := pythonPackagePin(spec)
 	if cfg.Logger != nil {
-		cfg.Logger.Info("installing SBOM generator", "package", spec.Package, "source", spec.Source, "command", strings.Join([]string{venvPython, "-m", "pip", "install", pkg}, " "))
+		cfg.Logger.Info(installingGeneratorLogMessage, "package", spec.Package, "source", spec.Source, "command", strings.Join([]string{venvPython, "-m", "pip", "install", pkg}, " "))
 	}
 	output, err = cfg.Runner(installCtx, RunOptions{Name: venvPython, Args: []string{"-m", "pip", "install", pkg}})
 	if err != nil {

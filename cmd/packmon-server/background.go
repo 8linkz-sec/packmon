@@ -25,6 +25,10 @@ import (
 	"github.com/8linkz-sec/packmon/internal/telemetry"
 )
 
+// queueProcessorStoppedLogMessage is the log message for a queue processor
+// that returned an error, on every restart path.
+const queueProcessorStoppedLogMessage = "queue processor stopped with error"
+
 type backgroundServices struct {
 	logger           *slog.Logger
 	cfg              *config.Config
@@ -497,7 +501,7 @@ func (b *backgroundServices) finishDeferredQueueRestart(oldDone, forward chan er
 	b.removeQueueDoneLocked(forward)
 	b.queueDone = nil
 	if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-		b.logger.Error("queue processor stopped with error", "reason", "deferred restart", "error", boundedErrorLogValue(err))
+		b.logger.Error(queueProcessorStoppedLogMessage, "reason", "deferred restart", "error", boundedErrorLogValue(err))
 	}
 	if err := b.startQueueProcessorLocked(); err != nil {
 		if b.logger != nil {
@@ -541,7 +545,7 @@ func (b *backgroundServices) waitForQueueProcessor(done chan error, reason strin
 	select {
 	case err := <-done:
 		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("queue processor stopped with error", "reason", reason, "error", boundedErrorLogValue(err))
+			b.logger.Error(queueProcessorStoppedLogMessage, "reason", reason, "error", boundedErrorLogValue(err))
 		}
 		if b.logger != nil {
 			b.logger.Info("queue processor stopped", "reason", reason)
@@ -658,7 +662,7 @@ func (b *backgroundServices) stopAndWaitQueueProcessors(start time.Time) {
 		}
 		err := <-queueDone
 		if err != nil && !errors.Is(err, context.Canceled) && b.logger != nil {
-			b.logger.Error("queue processor stopped with error", "error", boundedErrorLogValue(err))
+			b.logger.Error(queueProcessorStoppedLogMessage, "error", boundedErrorLogValue(err))
 		}
 		if b.logger != nil {
 			b.logger.Info("shutdown: queue processor stopped", slog.Duration("elapsed", time.Since(start)))

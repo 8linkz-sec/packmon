@@ -35,7 +35,11 @@ type bucket struct {
 	lastSeen time.Time
 }
 
-const rateLimiterShardCount = 64
+const (
+	rateLimiterShardCount = 64
+	// rateLimitExceededMessage is the 429 response text and its debug log message.
+	rateLimitExceededMessage = "rate limit exceeded"
+)
 
 type rateLimiterShard struct {
 	mu      sync.Mutex
@@ -183,12 +187,12 @@ func rateLimitMiddleware(rl *rateLimiter, logger *slog.Logger) func(http.Handler
 			}
 			ip := clientIP(r)
 			if !rl.allow(ip) {
-				logger.Debug("rate limit exceeded",
+				logger.Debug(rateLimitExceededMessage,
 					slog.String("client_ip", ip),
 					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
 					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
 				)
-				writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				writeJSONError(w, http.StatusTooManyRequests, rateLimitExceededMessage)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -213,7 +217,7 @@ func authenticatedAPIKeyRateLimitMiddleware(rl *rateLimiter, logger *slog.Logger
 					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
 					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
 				)
-				writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				writeJSONError(w, http.StatusTooManyRequests, rateLimitExceededMessage)
 				return
 			}
 			next.ServeHTTP(w, r)

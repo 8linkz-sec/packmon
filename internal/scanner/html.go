@@ -19,6 +19,9 @@ import (
 const (
 	defaultHTMLReportLang = "en"
 	maxHTMLReportWarnings = 5
+	// reputationInfoLabel is the section title and finding-count noun of
+	// informational reputation findings.
+	reputationInfoLabel = "Reputation info"
 )
 
 // HTMLWriter renders a scan result as a single self-contained HTML report.
@@ -154,7 +157,7 @@ var sectionDefs = []sectionDef{
 	{key: string(domain.FindingTypeSupplyChainRisk), title: "Supply-Chain / EOL", class: "s-sce", id: "section-supply-chain-eol"},
 	{key: string(domain.FindingTypeVulnerability), title: "Vulnerabilities", class: "s-vuln", id: "section-vulnerabilities"},
 	{key: string(domain.FindingTypeLifecycle), title: "Lifecycle Findings", class: "s-life", id: "section-lifecycle-findings"},
-	{key: "reputation_info", title: "Reputation info", class: "s-life", id: "section-reputation-info"},
+	{key: "reputation_info", title: reputationInfoLabel, class: "s-life", id: "section-reputation-info"},
 }
 
 func buildReport(title, toolVersion string, failOn domain.Severity, result *domain.ScanResult) htmlReport {
@@ -484,7 +487,7 @@ func htmlTypeBadgeLabel(key string, count int) string {
 	case string(domain.FindingTypeLifecycle):
 		return plural.Word(count, "Lifecycle finding", "Lifecycle findings")
 	case "reputation_info":
-		return plural.Word(count, "Reputation info", "Reputation info")
+		return plural.Word(count, reputationInfoLabel, reputationInfoLabel)
 	default:
 		return plural.Word(count, "Finding", "Findings")
 	}

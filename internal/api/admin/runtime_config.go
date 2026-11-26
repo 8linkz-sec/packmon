@@ -25,6 +25,18 @@ const (
 	adminFeedSyncIntervalQueueDrivenCode = "sync-interval-queue-driven"
 )
 
+// Status badge CSS classes of the admin pages.
+const (
+	badgeClassDefault    = "pm-badge-status-default"
+	badgeClassHealthy    = "pm-badge-status-healthy"
+	badgeClassDisabled   = "pm-badge-status-disabled"
+	badgeClassWarning    = "pm-badge-status-warning"
+	badgeClassError      = "pm-badge-status-error"
+	badgeClassConfigured = "pm-badge-status-configured"
+	badgeClassRunning    = "pm-badge-status-running"
+	badgeClassPending    = "pm-badge-status-pending"
+)
+
 type adminFeedFormRow struct {
 	FeedName                string
 	FeedKey                 string
@@ -54,21 +66,21 @@ type adminFeedFormRow struct {
 }
 
 func (row adminFeedRow) ConfigModeClass() string {
-	return "pm-badge-status-default"
+	return badgeClassDefault
 }
 
 func (row adminFeedRow) ConfigEnabledClass() string {
 	if row.ConfigEnabled {
-		return "pm-badge-status-healthy"
+		return badgeClassHealthy
 	}
-	return "pm-badge-status-disabled"
+	return badgeClassDisabled
 }
 
 func (row adminFeedRow) SyncIntervalClass() string {
 	if row.SyncIntervalCode == adminFeedSyncIntervalQueueDrivenCode {
-		return "pm-badge-status-disabled"
+		return badgeClassDisabled
 	}
-	return "pm-badge-status-default"
+	return badgeClassDefault
 }
 
 func (row adminFeedRow) LastSyncStatusClass() string {
@@ -81,53 +93,53 @@ func (row adminFeedRow) APIKeyStateClass() string {
 
 func (row adminFeedFormRow) OverrideClass() string {
 	if row.OverrideActive {
-		return "pm-badge-status-configured"
+		return badgeClassConfigured
 	}
-	return "pm-badge-status-default"
+	return badgeClassDefault
 }
 
 func (row adminFeedFormRow) RuntimeMatchClass() string {
 	if row.PendingRestart {
-		return "pm-badge-status-warning"
+		return badgeClassWarning
 	}
-	return "pm-badge-status-healthy"
+	return badgeClassHealthy
 }
 
 func (row adminFeedFormRow) UpdatedAtClass() string {
-	return "pm-badge-status-default"
+	return badgeClassDefault
 }
 
 func adminFeedLastSyncStatusClass(status string) string {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case db.FeedSyncStatusSuccess:
-		return "pm-badge-status-healthy"
+		return badgeClassHealthy
 	case db.FeedSyncStatusRunning:
-		return "pm-badge-status-running"
+		return badgeClassRunning
 	case db.FeedSyncStatusPending:
-		return "pm-badge-status-pending"
+		return badgeClassPending
 	case db.FeedSyncStatusError, db.FeedSyncStatusPermanentError, db.FeedSyncStatusRejected:
-		return "pm-badge-status-error"
+		return badgeClassError
 	case db.FeedSyncStatusExternal:
-		return "pm-badge-status-configured"
+		return badgeClassConfigured
 	case db.FeedSyncStatusDisabled, db.FeedSyncStatusSkipped:
-		return "pm-badge-status-disabled"
+		return badgeClassDisabled
 	case "":
-		return "pm-badge-status-default"
+		return badgeClassDefault
 	default:
-		return "pm-badge-status-warning"
+		return badgeClassWarning
 	}
 }
 
 func adminFeedAPIKeyStateClass(state string) string {
 	switch strings.TrimSpace(state) {
 	case adminFeedAPIKeyStateConfiguredCode:
-		return "pm-badge-status-healthy"
+		return badgeClassHealthy
 	case adminFeedAPIKeyStateMissingCode:
-		return "pm-badge-status-warning"
+		return badgeClassWarning
 	case adminFeedAPIKeyStateNotConfiguredCode:
-		return "pm-badge-status-disabled"
+		return badgeClassDisabled
 	default:
-		return "pm-badge-status-default"
+		return badgeClassDefault
 	}
 }
 
