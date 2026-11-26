@@ -22,24 +22,12 @@ variables:
   # package.json only has these scripts; build:web regenerates the committed tailwind.css and htmx.min.js.
   NODE_SCRIPTS: "lint:web lint:openapi build:web"
   # As in templates/go.yml, plus the generated/vendored web assets.
-  # Accepted findings, each ignored for one rule in one file only:
-  #   css:S9423 in style.css -- the prefers-reduced-motion reset keeps !important: its universal (*)
-  #     selector has zero specificity and must still beat every component transition. Every other
-  #     !important was removed; TestCustomStylesKeepImportantOnlyInReducedMotionReset keeps it that way.
-  #   javascript:S1874 in form-actions.js -- the unsaved-changes guard sets the deprecated
-  #     BeforeUnloadEvent.returnValue because Chrome/Edge before 119 (the UI baseline is Chrome 111+)
-  #     show the leave-page dialog only when it is set; preventDefault() alone is not enough there.
   SONAR_EXTRA_ARGS: >-
     -Dsonar.sources=.
     -Dsonar.exclusions=**/*_test.go,**/testdata/**,**/vendor/**,**/node_modules/**,.go/**,.cache/**,internal/web/static/htmx.min.js,internal/web/static/tailwind.css
     -Dsonar.tests=.
     -Dsonar.test.inclusions=**/*_test.go
     -Dsonar.go.coverage.reportPaths=coverage.out
-    -Dsonar.issue.ignore.multicriteria=s9423style,s1874unload
-    -Dsonar.issue.ignore.multicriteria.s9423style.ruleKey=css:S9423
-    -Dsonar.issue.ignore.multicriteria.s9423style.resourceKey=internal/web/static/style.css
-    -Dsonar.issue.ignore.multicriteria.s1874unload.ruleKey=javascript:S1874
-    -Dsonar.issue.ignore.multicriteria.s1874unload.resourceKey=internal/web/static/form-actions.js
 
 # The test suites require these tools and fail (by design) when one is missing:
 #   Chromium            HTML report browser tests in cmd/packmon (PACKMON_BROWSER_BIN)
