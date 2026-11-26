@@ -10,9 +10,11 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
-// recordingLocalChecker captures what the adapter forwarded, so the tests can
-// assert the translation rather than the underlying store's behaviour.
+// recordingLocalChecker captures which method the adapter called and what it
+// forwarded, so the tests can assert the translation rather than the
+// underlying store's behaviour.
 type recordingLocalChecker struct {
+	called    string
 	ecosystem string
 	name      string
 	version   string
@@ -31,31 +33,37 @@ func (c *recordingLocalChecker) result() ([]domain.Finding, error) {
 }
 
 func (c *recordingLocalChecker) FindVulnerabilities(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	c.called = "FindVulnerabilities"
 	c.ecosystem, c.name, c.version = ecosystem, name, version
 	return c.result()
 }
 
 func (c *recordingLocalChecker) FindMalicious(_ context.Context, ecosystem, name, version string) ([]domain.Finding, error) {
+	c.called = "FindMalicious"
 	c.ecosystem, c.name, c.version = ecosystem, name, version
 	return c.result()
 }
 
 func (c *recordingLocalChecker) FindVulnerabilitiesBatch(_ context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+	c.called = "FindVulnerabilitiesBatch"
 	c.packages = packages
 	return c.result()
 }
 
 func (c *recordingLocalChecker) FindMaliciousBatch(_ context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
+	c.called = "FindMaliciousBatch"
 	c.packages = packages
 	return c.result()
 }
 
 func (c *recordingLocalChecker) FindReputationFindingsBatch(_ context.Context, packages []db.PackageQuery, source string) ([]domain.Finding, error) {
+	c.called = "FindReputationFindingsBatch"
 	c.packages, c.source = packages, source
 	return c.result()
 }
 
 func (c *recordingLocalChecker) FindLifecycleFindingsBatch(_ context.Context, packages []db.PackageQuery, now time.Time) ([]domain.Finding, error) {
+	c.called = "FindLifecycleFindingsBatch"
 	c.packages, c.now = packages, now
 	return c.result()
 }
@@ -68,17 +76,20 @@ func TestDBLocalCheckerAdapterForwardsSingleLookups(t *testing.T) {
 	t.Parallel()
 
 	for _, tc := range []struct {
-		name string
-		call func(*DBLocalCheckerAdapter, context.Context) ([]domain.Finding, error)
+		name   string
+		method string
+		call   func(*DBLocalCheckerAdapter, context.Context) ([]domain.Finding, error)
 	}{
 		{
-			name: "vulnerabilities",
+			name:   "vulnerabilities",
+			method: "FindVulnerabilities",
 			call: func(a *DBLocalCheckerAdapter, ctx context.Context) ([]domain.Finding, error) {
 				return a.FindVulnerabilities(ctx, "npm", "left-pad", "1.0.0")
 			},
 		},
 		{
-			name: "malicious",
+			name:   "malicious",
+			method: "FindMalicious",
 			call: func(a *DBLocalCheckerAdapter, ctx context.Context) ([]domain.Finding, error) {
 				return a.FindMalicious(ctx, "npm", "left-pad", "1.0.0")
 			},
@@ -91,6 +102,9 @@ func TestDBLocalCheckerAdapterForwardsSingleLookups(t *testing.T) {
 		if err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 			continue
+		}
+		if checker.called != tc.method {
+			t.Errorf("%s: adapter called %q, want %q", tc.name, checker.called, tc.method)
 		}
 		if len(findings) != 1 || findings[0].Name != "left-pad" {
 			t.Errorf("%s: findings = %+v, want the checker's result passed through", tc.name, findings)
@@ -116,29 +130,34 @@ func TestDBLocalCheckerAdapterTranslatesBatchLookups(t *testing.T) {
 	now := time.Date(2026, 8, 4, 12, 0, 0, 0, time.UTC)
 
 	for _, tc := range []struct {
-		name string
-		call func(*DBLocalCheckerAdapter, context.Context) ([]domain.Finding, error)
+		name   string
+		method string
+		call   func(*DBLocalCheckerAdapter, context.Context) ([]domain.Finding, error)
 	}{
 		{
-			name: "vulnerabilities",
+			name:   "vulnerabilities",
+			method: "FindVulnerabilitiesBatch",
 			call: func(a *DBLocalCheckerAdapter, ctx context.Context) ([]domain.Finding, error) {
 				return a.FindVulnerabilitiesBatch(ctx, lookups)
 			},
 		},
 		{
-			name: "malicious",
+			name:   "malicious",
+			method: "FindMaliciousBatch",
 			call: func(a *DBLocalCheckerAdapter, ctx context.Context) ([]domain.Finding, error) {
 				return a.FindMaliciousBatch(ctx, lookups)
 			},
 		},
 		{
-			name: "reputation",
+			name:   "reputation",
+			method: "FindReputationFindingsBatch",
 			call: func(a *DBLocalCheckerAdapter, ctx context.Context) ([]domain.Finding, error) {
 				return a.FindReputationFindingsBatch(ctx, lookups, "openssf")
 			},
 		},
 		{
-			name: "lifecycle",
+			name:   "lifecycle",
+			method: "FindLifecycleFindingsBatch",
 			call: func(a *DBLocalCheckerAdapter, ctx context.Context) ([]domain.Finding, error) {
 				return a.FindLifecycleFindingsBatch(ctx, lookups, now)
 			},
@@ -150,6 +169,9 @@ func TestDBLocalCheckerAdapterTranslatesBatchLookups(t *testing.T) {
 		if _, err := tc.call(adapter, context.Background()); err != nil {
 			t.Errorf("%s: %v", tc.name, err)
 			continue
+		}
+		if checker.called != tc.method {
+			t.Errorf("%s: adapter called %q, want %q", tc.name, checker.called, tc.method)
 		}
 		if len(checker.packages) != 2 {
 			t.Errorf("%s: forwarded %d queries, want 2", tc.name, len(checker.packages))

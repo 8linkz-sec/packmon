@@ -24,7 +24,7 @@ func (s *Store) FindVulnerabilities(_ context.Context, ecosystem, name, version 
 			if pkg.Ecosystem != ecosystem || pkg.Name != name {
 				continue
 			}
-			if !noopVulnerabilityAffectsVersion(pkg.Ecosystem, version, string(pkg.VersionRanges), string(pkg.VersionsAffected)) {
+			if !noopAffectsVersion(pkg.Ecosystem, version, string(pkg.VersionRanges), string(pkg.VersionsAffected)) {
 				continue
 			}
 			source := "unknown"
@@ -53,7 +53,10 @@ func (s *Store) FindVulnerabilities(_ context.Context, ecosystem, name, version 
 	return findings, nil
 }
 
-func noopVulnerabilityAffectsVersion(ecosystem, version, rangesJSON, versionsJSON string) bool {
+// noopAffectsVersion reports whether version falls inside the vulnerability or
+// malicious-package constraints. A blank version or unparseable constraints
+// match conservatively.
+func noopAffectsVersion(ecosystem, version, rangesJSON, versionsJSON string) bool {
 	if strings.TrimSpace(version) == "" {
 		return true
 	}
@@ -76,7 +79,7 @@ func (s *Store) FindMalicious(_ context.Context, ecosystem, name, version string
 			continue
 		}
 
-		if !noopMaliciousAffectsVersion(mf.Ecosystem, version, string(mf.VersionRanges), string(mf.Versions)) {
+		if !noopAffectsVersion(mf.Ecosystem, version, string(mf.VersionRanges), string(mf.Versions)) {
 			continue
 		}
 
@@ -101,17 +104,6 @@ func (s *Store) FindMalicious(_ context.Context, ecosystem, name, version string
 	return findings, nil
 }
 
-func noopMaliciousAffectsVersion(ecosystem, version, rangesJSON, versionsJSON string) bool {
-	if strings.TrimSpace(version) == "" {
-		return true
-	}
-	rangesJSON, versionsJSON = db.NormalizeVersionConstraintJSON(rangesJSON, versionsJSON)
-	affected, err := versionpkg.VersionAffected(version, rangesJSON, versionsJSON, ecosystem)
-	if err != nil {
-		return true
-	}
-	return affected
-}
 
 func (s *Store) FindVulnerabilitiesBatch(ctx context.Context, packages []db.PackageQuery) ([]domain.Finding, error) {
 	var all []domain.Finding

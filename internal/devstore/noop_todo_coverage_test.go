@@ -190,14 +190,12 @@ func TestNoopFindingFallbacksAndSourceScopedDeletes(t *testing.T) {
 
 	ctx := context.Background()
 	store := newNoopStore()
-	if !noopVulnerabilityAffectsVersion("npm", "", `not-json`, `not-json`) {
-		t.Fatal("blank vulnerability version should conservatively match")
+	// Vulnerability and malicious-package lookups share noopAffectsVersion.
+	if !noopAffectsVersion("npm", "", `not-json`, `not-json`) {
+		t.Fatal("blank version should conservatively match")
 	}
-	if !noopVulnerabilityAffectsVersion("npm", "1.0.0", `not-json`, `not-json`) {
-		t.Fatal("invalid vulnerability constraints should conservatively match")
-	}
-	if !noopMaliciousAffectsVersion("npm", "", `not-json`, `not-json`) {
-		t.Fatal("blank malicious version should conservatively match")
+	if !noopAffectsVersion("npm", "1.0.0", `not-json`, `not-json`) {
+		t.Fatal("invalid constraints should conservatively match")
 	}
 
 	if err := store.UpsertMaliciousFinding(ctx, &db.MaliciousFinding{

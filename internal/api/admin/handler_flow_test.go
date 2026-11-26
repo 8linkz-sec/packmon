@@ -749,18 +749,7 @@ func (s *adminFlowStoreStub) PauseQueueJob(ctx context.Context, jobID int) error
 }
 
 func (s *adminFlowStoreStub) PauseQueueJobWithAudit(_ context.Context, jobID int, audit *db.AdminAuditEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	index, err := s.queueJobIndexLocked(jobID)
-	if err != nil {
-		return err
-	}
-	if err := s.insertAdminAuditLogLocked(audit); err != nil {
-		return err
-	}
-	s.queueJobs[index].Status = "paused"
-	s.queueJobs[index].Error = ""
-	return nil
+	return s.setQueueStatusWithAudit(jobID, "paused", audit)
 }
 
 func (s *adminFlowStoreStub) ResumeQueueJob(ctx context.Context, jobID int) error {
@@ -768,18 +757,7 @@ func (s *adminFlowStoreStub) ResumeQueueJob(ctx context.Context, jobID int) erro
 }
 
 func (s *adminFlowStoreStub) ResumeQueueJobWithAudit(_ context.Context, jobID int, audit *db.AdminAuditEntry) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	index, err := s.queueJobIndexLocked(jobID)
-	if err != nil {
-		return err
-	}
-	if err := s.insertAdminAuditLogLocked(audit); err != nil {
-		return err
-	}
-	s.queueJobs[index].Status = "pending"
-	s.queueJobs[index].Error = ""
-	return nil
+	return s.setQueueStatusWithAudit(jobID, "pending", audit)
 }
 
 func (s *adminFlowStoreStub) RetryQueueJob(ctx context.Context, jobID int) error {
@@ -787,6 +765,12 @@ func (s *adminFlowStoreStub) RetryQueueJob(ctx context.Context, jobID int) error
 }
 
 func (s *adminFlowStoreStub) RetryQueueJobWithAudit(_ context.Context, jobID int, audit *db.AdminAuditEntry) error {
+	return s.setQueueStatusWithAudit(jobID, "pending", audit)
+}
+
+// setQueueStatusWithAudit records the audit entry and moves the job to
+// status in one locked step, as the audited store methods do atomically.
+func (s *adminFlowStoreStub) setQueueStatusWithAudit(jobID int, status string, audit *db.AdminAuditEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	index, err := s.queueJobIndexLocked(jobID)
@@ -796,7 +780,7 @@ func (s *adminFlowStoreStub) RetryQueueJobWithAudit(_ context.Context, jobID int
 	if err := s.insertAdminAuditLogLocked(audit); err != nil {
 		return err
 	}
-	s.queueJobs[index].Status = "pending"
+	s.queueJobs[index].Status = status
 	s.queueJobs[index].Error = ""
 	return nil
 }
