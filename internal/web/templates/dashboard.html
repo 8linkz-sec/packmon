@@ -110,7 +110,7 @@
                 target="_blank"
                 rel="noopener"
                 class="text-accent hover:underline"
-              ><bdi dir="auto">{{.ID}}</bdi>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
+              ><bdi dir="auto">{{.ID}}</bdi><span class="sr-only"> {{t "dashboard.advisory_suffix"}}</span>{{template "external-link-icon"}}<span class="sr-only">{{newTabSRText}}</span></a>
               {{else}}
               <bdi dir="auto">{{.ID}}</bdi>
               {{end}}

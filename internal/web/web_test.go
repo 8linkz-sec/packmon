@@ -2395,7 +2395,10 @@ func TestDashboardExternalAdvisoryLinksAndTimesAreAccessible(t *testing.T) {
 		t.Fatalf("Dashboard status = %d, want %d", rec.Code, http.StatusOK)
 	}
 	body := rec.Body.String()
-	newTabLinkNamedByContent(t, body, "CVE-2026-0001")
+	advisoryLink := newTabLinkNamedByContent(t, body, "CVE-2026-0001")
+	if got, want := linkTextContent(advisoryLink), "CVE-2026-0001 advisory (opens in a new tab)"; got != want {
+		t.Fatalf("Dashboard advisory link accessible name = %q, want %q:\n%s", got, want, advisoryLink)
+	}
 	for _, want := range []string{
 		`data-external-link-icon`,
 		`aria-hidden="true"`,

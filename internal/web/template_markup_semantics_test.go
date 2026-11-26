@@ -20,20 +20,40 @@ import (
 // does (an HTML tokenizer that knows nothing about Go template actions), so a
 // template that passes them also passes Web:S6811, Web:S6819 and Web:S7927,
 // and the scrollable-region exception for Web:S6845 stays limited to the
-// files listed in sonar-project.properties.
+// files listed in sonar-project.properties. The aria-label check is stricter
+// than Web:S7927: it also checks one-word literal labels and visible text
+// nested in child elements.
 
 type templateTag struct {
 	file  string
 	line  int
 	name  string
 	attrs map[string]string
+	// hidden is true when the element or one of its ancestors is not
+	// visible: class sr-only or aria-hidden="true".
+	hidden bool
 }
 
 type templateText struct {
 	file   string
 	line   int
 	parent *templateTag
-	text   string
+	// ancestors are the open elements around the text, outermost first;
+	// the last one is parent.
+	ancestors []*templateTag
+	text      string
+}
+
+var srOnlyClass = regexp.MustCompile(`(^|\s)sr-only(\s|$)`)
+
+func newTemplateTag(file string, line int, token html.Token, open []*templateTag) *templateTag {
+	tag := &templateTag{file: file, line: line, name: token.Data, attrs: map[string]string{}}
+	for _, attr := range token.Attr {
+		tag.attrs[attr.Key] = attr.Val
+	}
+	inherited := len(open) > 0 && open[len(open)-1].hidden
+	tag.hidden = inherited || srOnlyClass.MatchString(tag.attrs["class"]) || tag.attrs["aria-hidden"] == "true"
+	return tag
 }
 
 type templateMarkup struct {
@@ -80,10 +100,7 @@ func scanTemplateFile(file, source string, markup *templateMarkup) {
 		token := tokenizer.Token()
 		switch kind {
 		case html.StartTagToken, html.SelfClosingTagToken:
-			tag := &templateTag{file: file, line: line, name: token.Data, attrs: map[string]string{}}
-			for _, attr := range token.Attr {
-				tag.attrs[attr.Key] = attr.Val
-			}
+			tag := newTemplateTag(file, line, token, open)
 			markup.tags = append(markup.tags, tag)
 			if kind == html.StartTagToken && !templateVoidElements[tag.name] {
 				open = append(open, tag)
@@ -97,7 +114,9 @@ func scanTemplateFile(file, source string, markup *templateMarkup) {
 			}
 		case html.TextToken:
 			if len(open) > 0 && strings.TrimSpace(token.Data) != "" {
-				markup.texts = append(markup.texts, templateText{file: file, line: line, parent: open[len(open)-1], text: token.Data})
+				markup.texts = append(markup.texts, templateText{
+					file: file, line: line, parent: open[len(open)-1], ancestors: slices.Clone(open), text: token.Data,
+				})
 			}
 		}
 		line += strings.Count(raw, "\n")
@@ -108,32 +127,59 @@ func normalizeAccessibleText(text string) string {
 	return strings.Join(strings.Fields(strings.ToLower(text)), " ")
 }
 
-// Mirrors Web:S7927: an aria-label on a button, link, select, textarea or
-// role="button" element must contain each of its visible direct text nodes.
+// Mirrors Web:S7927, stricter: an aria-label on a button, link, select,
+// textarea or role="button" element must contain each visible text node of the
+// element, also one-word literal labels and text nested in child elements.
+// Text inside sr-only or aria-hidden elements is not visible and is skipped; a
+// select is checked only against its direct text (option text is not its
+// label); a one-word text that is a single Go template action ({{.Name}}) is
+// skipped as Sonar does, because its rendered value is unknown here.
 // Composing the aria-label from the same {{t ...}} action as the visible label
 // keeps the rendered accessible name and the visible label in step.
 func TestTemplateAriaLabelsContainTheirVisibleLabel(t *testing.T) {
 	t.Parallel()
 
-	labelled := map[string]bool{"a": true, "button": true, "select": true, "textarea": true}
 	var violations []string
 	for _, text := range scanTemplateMarkup(t).texts {
-		parent := text.parent
-		if !labelled[parent.name] && !strings.EqualFold(parent.attrs["role"], "button") {
-			continue
-		}
-		ariaLabel := strings.TrimSpace(parent.attrs["aria-label"])
 		visible := normalizeAccessibleText(text.text)
-		if ariaLabel == "" || len(strings.Fields(visible)) == 1 {
+		if text.parent.hidden || isSingleTemplateAction(visible) {
 			continue
 		}
-		if !strings.Contains(normalizeAccessibleText(ariaLabel), visible) {
-			violations = append(violations, parent.file+":"+strconv.Itoa(parent.line)+" <"+parent.name+"> aria-label "+strconv.Quote(ariaLabel)+" lacks visible text "+strconv.Quote(visible))
+		for _, labelled := range ariaLabelledAncestors(text) {
+			ariaLabel := strings.TrimSpace(labelled.attrs["aria-label"])
+			if !strings.Contains(normalizeAccessibleText(ariaLabel), visible) {
+				violations = append(violations, labelled.file+":"+strconv.Itoa(labelled.line)+" <"+labelled.name+"> aria-label "+strconv.Quote(ariaLabel)+" lacks visible text "+strconv.Quote(visible))
+			}
 		}
 	}
 	if len(violations) > 0 {
 		t.Fatalf("aria-label must contain the visible label:\n%s", strings.Join(violations, "\n"))
 	}
+}
+
+var labelInNameElements = map[string]bool{"a": true, "button": true, "select": true, "textarea": true}
+
+// ariaLabelledAncestors returns the elements around text whose aria-label
+// must contain it: Sonar's label-in-name elements with a non-blank
+// aria-label, where a select only counts for its own direct text.
+func ariaLabelledAncestors(text templateText) []*templateTag {
+	var labelled []*templateTag
+	for _, tag := range text.ancestors {
+		if !labelInNameElements[tag.name] && !strings.EqualFold(tag.attrs["role"], "button") {
+			continue
+		}
+		if strings.TrimSpace(tag.attrs["aria-label"]) == "" || (tag.name == "select" && tag != text.parent) {
+			continue
+		}
+		labelled = append(labelled, tag)
+	}
+	return labelled
+}
+
+var singleTemplateAction = regexp.MustCompile(`^\{\{[^{}\s]*\}\}$`)
+
+func isSingleTemplateAction(visible string) bool {
+	return singleTemplateAction.MatchString(visible)
 }
 
 // Mirrors Web:S6819 for the roles the templates used: landmarks, live status
@@ -217,8 +263,10 @@ func TestFocusableNonInteractiveElementsAreScrollableRegionsListedInSonarExclusi
 		if !ok || sonarInteractiveElements[tag.name] {
 			continue
 		}
-		index, err := strconv.Atoi(value)
-		if err != nil || index < 0 {
+		// A templated or otherwise non-numeric value may render as 0, so only
+		// a value that parses as negative is known to keep the element out of
+		// the tab order.
+		if index, err := strconv.Atoi(value); err == nil && index < 0 {
 			continue
 		}
 		if !scrollableRegionClass.MatchString(tag.attrs["class"]) {

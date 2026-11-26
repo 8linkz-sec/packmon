@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -878,4 +880,11 @@ func newTabLinkNamedByContent(t *testing.T, body, label string) string {
 		t.Fatalf("link %q is missing the screen-reader new-tab note after its label:\n%s", label, link)
 	}
 	return link
+}
+
+// linkTextContent returns the text content of rendered link markup with tags
+// removed and whitespace collapsed: the accessible name of a link that has no
+// aria-label (the external-link icon is aria-hidden and carries no text).
+func linkTextContent(link string) string {
+	return strings.Join(strings.Fields(html.UnescapeString(regexp.MustCompile(`<[^>]*>`).ReplaceAllString(link, ""))), " ")
 }

@@ -772,6 +772,7 @@ var webMessagesEN = map[webMessageKey]string{
 	webMessageKey("dashboard.severity.heading"):                         "Findings by Severity",
 	webMessageKey("dashboard.recent_vulnerabilities.heading"):           "Recently Published Vulnerabilities (7 Days)",
 	webMessageKey("dashboard.recent_vulnerabilities.table"):             "Recently published vulnerabilities table",
+	webMessageKey("dashboard.advisory_suffix"):                          "advisory",
 	webMessageKey("dashboard.table.advisory"):                           "Advisory",
 	webMessageKey("dashboard.table.package"):                            "Package",
 	webMessageKey("dashboard.table.version"):                            "Version",
