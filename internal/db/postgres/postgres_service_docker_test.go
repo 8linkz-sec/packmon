@@ -16,7 +16,7 @@ import (
 // daemon, so the integration job runs the server as a job service and names it in these variables instead. Each
 // holds the URL of the server's maintenance database (for example .../postgres?sslmode=disable) with the user
 // packmon:packmon, because the tests derive their role DSNs from that user part. The server must be a
-// throwaway one: serviceTestPostgresDSN drops databases and roles on it.
+// throwaway one: serviceTestPostgresDSN drops its packmon database and the serviceTestRoles.
 const (
 	// testPostgresURLEnv names a server started with pg_stat_statements preloaded, like the default container.
 	testPostgresURLEnv = "PACKMON_TEST_POSTGRES_URL"
@@ -24,7 +24,7 @@ const (
 
 // serviceTestPostgresDSN returns the DSN of an empty packmon database on the server envName names, or false
 // when the variable is unset and the caller starts its own container. Like a new container, the server is
-// reset first: the previous test's packmon database and every role a test created are dropped. Tests sharing
+// reset first: the previous test's packmon database and the roles of serviceTestRoles are dropped. Tests sharing
 // one server therefore run one at a time (go test -p 1, no t.Parallel).
 func serviceTestPostgresDSN(t *testing.T, envName string) (string, bool) {
 	t.Helper()
@@ -52,6 +52,11 @@ func serviceTestPostgresDSN(t *testing.T, envName string) (string, bool) {
 	return target.String(), true
 }
 
+// serviceTestRoles are the roles the integration tests create (f103_f105_contracts_docker_test.go,
+// f149_f152_migration_contracts_docker_test.go, migrator_docker_test.go). The reset drops only these, so a
+// server named by mistake loses no other role; a test that creates a new role adds it here.
+var serviceTestRoles = []string{"f104_limited", "packmon_f149", "packmon_migrator"}
+
 func connectServiceTestPostgres(ctx context.Context, t *testing.T, raw, envName string) *pgx.Conn {
 	t.Helper()
 
@@ -74,16 +79,8 @@ func resetServiceTestPostgres(ctx context.Context, t *testing.T, conn *pgx.Conn,
 	if _, err := conn.Exec(ctx, `DROP DATABASE IF EXISTS packmon WITH (FORCE)`); err != nil {
 		t.Fatalf("drop the previous packmon database on the %s server: %v", envName, err)
 	}
-	rows, err := conn.Query(ctx, `SELECT rolname FROM pg_roles WHERE rolname !~ '^pg_' AND rolname <> current_user`)
-	if err != nil {
-		t.Fatalf("list test roles on the %s server: %v", envName, err)
-	}
-	roles, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		t.Fatalf("read test roles on the %s server: %v", envName, err)
-	}
-	for _, role := range roles {
-		if _, err := conn.Exec(ctx, `DROP ROLE `+pgx.Identifier{role}.Sanitize()); err != nil {
+	for _, role := range serviceTestRoles {
+		if _, err := conn.Exec(ctx, `DROP ROLE IF EXISTS `+pgx.Identifier{role}.Sanitize()); err != nil {
 			t.Fatalf("drop test role %q on the %s server: %v", role, envName, err)
 		}
 	}

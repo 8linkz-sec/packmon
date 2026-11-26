@@ -89,8 +89,8 @@ func TestGitLabTaggedJobsUseTheTaggedInventory(t *testing.T) {
 	}
 	for job, wants := range map[string][]string{
 		"go-vet-tagged":       {taggedPackagesScript + " integration e2e", "go vet -tags integration,e2e"},
-		"go-test-e2e":         {taggedPackagesScript + " e2e", "make build", "-tags e2e", "PACKMON_TEST_BIN_DIR", "--- SKIP"},
-		"go-test-integration": {taggedPackagesScript + " integration", "make build build-server", "-tags integration", "PACKMON_TEST_BIN_DIR", dockerOnlyListPath},
+		"go-test-e2e":         {taggedPackagesScript + " e2e", "make build", "-tags e2e", "PACKMON_TEST_BIN_DIR", skippedTestsScript},
+		"go-test-integration": {taggedPackagesScript + " integration", "make build build-server", "-tags integration", "PACKMON_TEST_BIN_DIR", skipPatternScript},
 	} {
 		node, ok := pipeline[job]
 		if !ok {

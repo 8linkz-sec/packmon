@@ -102,7 +102,8 @@ go-vet-tagged:
     - go vet -tags integration,e2e $packages
 
 # `make test-e2e`: the built CLI and a headless Chromium (.packmon-test-tools sets PACKMON_BROWSER_BIN). The browser
-# test skips when it finds no browser, and a skip must not pass as coverage: the job fails on any skipped test.
+# test skips when it finds no browser, and a skip must not pass as coverage: the job fails on any skipped test
+# (scripts/fail-on-skipped-tests.sh; tests/ci tests the script and pins these lines).
 go-test-e2e:
   extends: [.go-base, .packmon-test-tools]
   stage: test
@@ -113,10 +114,7 @@ go-test-e2e:
       status=0
       PACKMON_TEST_BIN_DIR="$CI_PROJECT_DIR" go test -count=1 -v -timeout=10m -tags e2e $packages > /tmp/e2e-test.log 2>&1 || status=1
       cat /tmp/e2e-test.log
-      if grep -n -- '--- SKIP' /tmp/e2e-test.log; then
-        echo "e2e tests were skipped (missing browser or tool); every e2e test must run in CI"
-        status=1
-      fi
+      bash scripts/fail-on-skipped-tests.sh /tmp/e2e-test.log || status=1
       exit "$status"
 
 # `make test-integration` against two PostgreSQL services instead of per-test `docker run` containers (the runners
@@ -124,7 +122,8 @@ go-test-e2e:
 # the server like a fresh container for every test, so the packages run one at a time (-p 1). The services start
 # exactly like the harness containers: same image, same user, and the same -c options for the preloaded one; the
 # throwaway password belongs to job-local services without a published port. Tests that need a Docker daemon are
-# skipped by name from .gitlab/integration-docker-only.txt (each with its reason, checked by tests/ci).
+# skipped by name from .gitlab/integration-docker-only.txt (each with its reason) through
+# scripts/integration-skip-pattern.sh; tests/ci tests the script and pins -p 1 and -skip.
 # Every push: the run takes about 3 minutes (local measurement 2026-11-26, TESTING.md "CI integration and e2e
 # jobs"), comparable to go-test-race.
 go-test-integration:
@@ -157,8 +156,8 @@ go-test-integration:
   script:
     - make build build-server
     - packages=$(bash scripts/tagged-test-packages.sh integration)
-    - docker_only=$(grep -v -e '^#' -e '^[[:space:]]*$' .gitlab/integration-docker-only.txt | sed 's/[[:space:]]*#.*//' | paste -sd '|' -)
-    - PACKMON_TEST_BIN_DIR="$CI_PROJECT_DIR" go test -count=1 -p 1 -timeout=30m -tags integration -skip "^(${docker_only})\$" $packages
+    - skip_pattern=$(bash scripts/integration-skip-pattern.sh)
+    - PACKMON_TEST_BIN_DIR="$CI_PROJECT_DIR" go test -count=1 -p 1 -timeout=30m -tags integration -skip "$skip_pattern" $packages
 
 # The remaining gates of `make verify` that no template job runs. Each repeats its Makefile recipe with the
 # Makefile's pins (tests/ci TestGitLabLocalGateJobsMatchMakefilePins), as a separate job so one finding never
@@ -196,14 +195,28 @@ non-go-format:
   script:
     - make lint-nongo
 
-# lint-powershell. ErrorActionPreference Stop: without it a PSScriptAnalyzer that cannot load (for example on a
-# too old PowerShell) only writes an error and the empty finding list passes. The image follows the 7.5 line, the
-# newest Linux line Microsoft publishes on MCR.
+# lint-powershell. Microsoft no longer rebuilds the MCR PowerShell images (7.5-ubuntu-24.04 still ships 7.5.0), so
+# the job installs the current release from its official tarball, checked against the SHA-256 GitHub publishes for
+# that asset; a new release is a deliberate bump of both variables, like NODE_VERSION above. ErrorActionPreference
+# Stop ends the run at the first error of the module install or the analysis.
 psscriptanalyzer:
   stage: lint
-  image: mcr.microsoft.com/powershell:7.5-ubuntu-24.04
+  image: debian:trixie-slim
   needs: []
+  variables:
+    PWSH_VERSION: "7.7.0"
+    PWSH_SHA256: c89d9c682d2c403dfe726f3df948e359675235a5bd6fab535776de69729ca0cb
+    DEBIAN_FRONTEND: noninteractive
   script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends ca-certificates curl libicu76 >/dev/null
+    - |
+      pwsh_dir="$(mktemp -d)"
+      curl -fsSLo "$pwsh_dir/pwsh.tar.gz" "https://github.com/PowerShell/PowerShell/releases/download/v${PWSH_VERSION}/powershell-${PWSH_VERSION}-linux-x64.tar.gz"
+      echo "${PWSH_SHA256}  $pwsh_dir/pwsh.tar.gz" | sha256sum -c -
+      tar -xzf "$pwsh_dir/pwsh.tar.gz" -C "$pwsh_dir"
+      chmod +x "$pwsh_dir/pwsh"
+      export PATH="$pwsh_dir:$PATH"
     - >-
       pwsh -NoLogo -NoProfile -Command "\$ErrorActionPreference = 'Stop';
       \$PSVersionTable.PSVersion.ToString();

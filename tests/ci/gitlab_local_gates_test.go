@@ -23,6 +23,7 @@ func TestGitLabLocalGateJobsMatchMakefilePins(t *testing.T) {
 		{job: "shellcheck", image: pins["SHELLCHECK_IMAGE"], wants: []string{"shellcheck scripts/*.sh scripts/lib/*.sh deploy/n8n/*.sh"}},
 		{job: "hadolint", image: pins["HADOLINT_IMAGE"], wants: []string{"hadolint - < Dockerfile"}},
 		{job: "psscriptanalyzer", wants: []string{
+			"sha256sum -c",
 			"$ErrorActionPreference = 'Stop'",
 			"Install-Module -Name PSScriptAnalyzer -RequiredVersion " + pins["PSSCRIPTANALYZER_VERSION"],
 			"Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error",

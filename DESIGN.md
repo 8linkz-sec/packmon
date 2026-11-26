@@ -1901,7 +1901,7 @@ migration, and server tests. Each Docker-backed harness starts its own
 PostgreSQL container per test unless `PACKMON_TEST_POSTGRES_URL` (and, for
 the migration tests, `PACKMON_TEST_POSTGRES_PLAIN_URL`) names a throwaway
 server's maintenance database with the user `packmon:packmon`. The harness
-then drops that server's `packmon` database and the roles the tests created,
+then drops that server's `packmon` database and the fixed list of roles the tests create,
 creates an empty `packmon` database, and runs the test against it. Run such
 packages with `-p 1`, and skip the tests listed in
 `.gitlab/integration-docker-only.txt`, as the `go-test-integration` job does.
