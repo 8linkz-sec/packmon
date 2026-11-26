@@ -38,7 +38,9 @@ func TestESLintFlatConfigEffectiveBehavior(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, nodeBinary, "--input-type=module", "--eval", eslintContractHarness, configURL) // #nosec G204 -- test invokes the explicitly resolved Node binary with a fixed inline harness and repository-local config URL.
+	browserScripts := browserScriptPaths(t)
+	harnessArgs := append([]string{"--input-type=module", "--eval", eslintContractHarness, configURL}, browserScripts...)
+	cmd := exec.CommandContext(ctx, nodeBinary, harnessArgs...) // #nosec G204 -- test invokes the explicitly resolved Node binary with a fixed inline harness, the repository-local config URL and repository-local script paths.
 	cmd.Dir = repoRoot
 	output, runErr := cmd.CombinedOutput()
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -52,8 +54,14 @@ func TestESLintFlatConfigEffectiveBehavior(t *testing.T) {
 		t.Fatalf("decode ESLint effective-config JSON: %v\n%s", err, output)
 	}
 
-	for _, target := range []string{"auto-refresh", "theme-init"} {
-		assertESLintConfig(t, result.Configs[target], 2022, "script", []string{"document", "Event", "localStorage", "navigator", "Number", "window"}, []string{"module", "process", "URL"})
+	for _, path := range browserScripts {
+		t.Run(path, func(t *testing.T) {
+			got, ok := result.Configs[path]
+			if !ok {
+				t.Fatalf("ESLint effective-config harness returned no config for %s", path)
+			}
+			assertESLintConfig(t, got, 2022, "script", []string{"document", "Event", "localStorage", "navigator", "Number", "URL", "window"}, []string{"console", "module", "process"})
+		})
 	}
 	assertESLintConfig(t, result.Configs["build"], 2022, "module", []string{"console", "module", "process", "URL"}, []string{"document", "Event", "localStorage", "navigator", "window"})
 
@@ -82,6 +90,36 @@ func TestESLintFlatConfigEffectiveBehavior(t *testing.T) {
 			t.Fatalf("ESLint effective config does not ignore %s", path)
 		}
 	}
+}
+
+// vendoredBrowserScripts are third-party files in internal/web/static that
+// stay out of ESLint and lint:js; every other static script is first-party.
+var vendoredBrowserScripts = map[string]bool{
+	"htmx.min.js": true,
+}
+
+// browserScriptPaths lists every first-party internal/web/static/*.js file as
+// a slash-separated repository-relative path, sorted.
+func browserScriptPaths(t *testing.T) []string {
+	t.Helper()
+
+	matches, err := filepath.Glob(filepath.Join(repositoryRoot(t), "internal", "web", "static", "*.js"))
+	if err != nil {
+		t.Fatalf("list internal/web/static scripts: %v", err)
+	}
+	var paths []string
+	for _, match := range matches {
+		name := filepath.Base(match)
+		if vendoredBrowserScripts[name] {
+			continue
+		}
+		paths = append(paths, "internal/web/static/"+name)
+	}
+	if len(paths) == 0 {
+		t.Fatal("no first-party scripts found in internal/web/static")
+	}
+	slices.Sort(paths)
+	return paths
 }
 
 func assertESLintConfig(t *testing.T, got eslintConfigSnapshot, ecmaVersion int, sourceType string, present, absent []string) {
@@ -139,10 +177,11 @@ const eslint = new ESLint({
   overrideConfig: loaded.default,
 });
 const targets = {
-  "auto-refresh": "internal/web/static/auto-refresh.js",
-  "theme-init": "internal/web/static/theme-init.js",
   "build": "scripts/build-web-assets.mjs",
 };
+for (const browserScript of process.argv.slice(2)) {
+  targets[browserScript] = browserScript;
+}
 
 const configs = {};
 for (const [name, filePath] of Object.entries(targets)) {
@@ -159,7 +198,7 @@ async function diagnostics(filePath, code) {
   return result.messages.map(({ ruleId, fatal }) => ({ ruleId, fatal: fatal === true }));
 }
 
-const browserPath = targets["auto-refresh"];
+const browserPath = "internal/web/static/auto-refresh.js";
 const buildPath = targets.build;
 const checks = {
   "browser-known": await diagnostics(browserPath, "document; window;"),

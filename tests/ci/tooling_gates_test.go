@@ -66,6 +66,45 @@ func TestNonGoFormattingGateIsConfigured(t *testing.T) {
 	}
 }
 
+func TestLintJSChecksEveryFirstPartyBrowserScript(t *testing.T) {
+	t.Parallel()
+
+	var pkg struct {
+		Scripts map[string]string `json:"scripts"`
+	}
+	if err := json.Unmarshal([]byte(readRepoFile(t, "package.json")), &pkg); err != nil {
+		t.Fatalf("parse package.json: %v", err)
+	}
+	script, ok := pkg.Scripts["lint:js"]
+	if !ok {
+		t.Fatal("package.json missing script \"lint:js\"")
+	}
+
+	syntaxChecked := map[string]bool{}
+	linted := map[string]bool{}
+	for command := range strings.SplitSeq(script, "&&") {
+		fields := strings.Fields(command)
+		switch {
+		case len(fields) == 3 && fields[0] == "node" && fields[1] == "--check":
+			syntaxChecked[fields[2]] = true
+		case len(fields) > 1 && fields[0] == "eslint":
+			for _, arg := range fields[1:] {
+				linted[arg] = true
+			}
+		}
+	}
+
+	for _, path := range browserScriptPaths(t) {
+		arg := "./" + path
+		if !syntaxChecked[arg] {
+			t.Errorf("package.json lint:js has no \"node --check %s\"", arg)
+		}
+		if !linted[arg] {
+			t.Errorf("package.json lint:js eslint command does not lint %s", arg)
+		}
+	}
+}
+
 func TestWebAssetAndOpenAPILintScriptsArePinned(t *testing.T) {
 	t.Parallel()
 
