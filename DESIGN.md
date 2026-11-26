@@ -1768,16 +1768,39 @@ own project under the repository's project. Accepted findings would go into
 `SONAR_EXTRA_ARGS` scope options). It is a development pipeline for Packmon
 itself, not a Packmon scan, and it does not run `ci/gitlab/.packmon-scan.yml`.
 
-Packmon overrides three template jobs. `go-test` and `go-test-race` first
+Packmon overrides four template jobs. `go-test` and `go-test-race` first
 provide the tools the test suites require instead of skipping: Chromium for
 the HTML report browser tests (`PACKMON_BROWSER_BIN`), Node.js with `npm ci`
 for the ESLint, Stylelint, and `.npmrc` contracts, the Docker CLI with the
 Compose plugin for the `docker compose config` contracts (no daemon), and
 golangci-lint for its configuration contract; they exclude `node_modules`
 from the package list like the Makefile's `GO_PACKAGES`. The `golangci-lint`
-job uses the Makefile's pinned linter version so local and CI runs agree. The
+job uses the Makefile's pinned linter version so local and CI runs agree.
+`npm-audit` audits the dev dependencies too, like `make security`. The
 repository `.gitleaks.toml` keeps the shared gitleaks policy and additionally
 allowlists only the made-up keys in the `internal/logsafe` redaction fixtures.
+
+The repository adds jobs for the tag-gated suites, on every push.
+`go-vet-tagged` vets every `integration` and `e2e` tagged package.
+`go-test-e2e` builds the CLI and runs the `e2e` suites with the headless
+Chromium of the test tools, and it fails if any test skips. The browser test
+skips when it finds no browser, so a skip would hide missing coverage.
+`go-test-integration` builds both binaries and runs the `integration` suites
+one package at a time (`-p 1`). Instead of per-test `docker run` containers,
+it uses two job PostgreSQL services with the harness image and options, one
+with and one without the `pg_stat_statements` preload: the runners have no
+Docker daemon. The harnesses read `PACKMON_TEST_POSTGRES_URL` and
+`PACKMON_TEST_POSTGRES_PLAIN_URL` and reset the server like a fresh container
+before every test. Tests that need a Docker daemon are skipped by name from
+`.gitlab/integration-docker-only.txt`, each with its reason; `make
+test-integration` still runs them on a host with Docker.
+`scripts/tagged-test-packages.sh` derives the package lists, so a new tagged
+test package runs without a pipeline edit. Further jobs repeat the remaining
+gates of `make verify` with the Makefile's pins: `shellcheck`, `hadolint`,
+`non-go-format`, `psscriptanalyzer`, `go-coverage-gate` (the 79.5 % total
+floor on `go-test`'s profile), `gosec`, and `trivy-fs`. The tagged
+golangci-lint pass of `make lint` stays local until its existing findings are
+fixed.
 
 The GitLab consumer template parses `feed_status`, `db_stale`, and
 `db_age_days` from the JSON result artifact and writes degraded coverage into
@@ -1874,7 +1897,14 @@ The `integration` tag gates tests in four packages: `./tests/integration`,
 `./internal/db/postgres`, `./internal/db/postgres/migrations`, and
 `./internal/server`. `make test-integration` builds both binaries and runs all
 four; running only `./tests/integration` skips the tagged PostgreSQL store,
-migration, and server tests.
+migration, and server tests. Each Docker-backed harness starts its own
+PostgreSQL container per test unless `PACKMON_TEST_POSTGRES_URL` (and, for
+the migration tests, `PACKMON_TEST_POSTGRES_PLAIN_URL`) names a throwaway
+server's maintenance database with the user `packmon:packmon`. The harness
+then drops that server's `packmon` database and the roles the tests created,
+creates an empty `packmon` database, and runs the test against it. Run such
+packages with `-p 1`, and skip the tests listed in
+`.gitlab/integration-docker-only.txt`, as the `go-test-integration` job does.
 
 The Docker/PostgreSQL production integration test is the strongest local proxy
 for a real deployment:
