@@ -75,14 +75,22 @@ func TestDBPERF001MaliciousSearchScaleContract(t *testing.T) {
 	}
 
 	assertMaliciousSearchExactResults(t, store, ctx)
-	assertMaliciousSearchPlan(t, store, ctx, "unfiltered", maliciousPackageSearchUnfilteredSQL,
-		[]any{201}, "idx_malicious_active_search_order", true)
-	assertMaliciousSearchPlan(t, store, ctx, "name", maliciousPackageSearchNameSQL,
-		[]any{"%aaa-overlap%", 201}, "idx_malicious_findings_name_trgm", false)
-	assertMaliciousSearchPlan(t, store, ctx, "severity", maliciousPackageSearchSeveritySQL,
-		[]any{"CRITICAL", 201}, "idx_malicious_active_severity_search", true)
-	assertMaliciousSearchPlan(t, store, ctx, "name and severity", maliciousPackageSearchNameSeveritySQL,
-		[]any{"%aaa-overlap%", "CRITICAL", 201}, "idx_malicious_findings_name_trgm", false)
+	assertMaliciousSearchPlan(t, store, ctx, maliciousSearchPlanCase{
+		name: "unfiltered", query: maliciousPackageSearchUnfilteredSQL, args: []any{201},
+		wantIndex: "idx_malicious_active_search_order", wantIndexOnly: true,
+	})
+	assertMaliciousSearchPlan(t, store, ctx, maliciousSearchPlanCase{
+		name: "name", query: maliciousPackageSearchNameSQL, args: []any{"%aaa-overlap%", 201},
+		wantIndex: "idx_malicious_findings_name_trgm", wantIndexOnly: false,
+	})
+	assertMaliciousSearchPlan(t, store, ctx, maliciousSearchPlanCase{
+		name: "severity", query: maliciousPackageSearchSeveritySQL, args: []any{"CRITICAL", 201},
+		wantIndex: "idx_malicious_active_severity_search", wantIndexOnly: true,
+	})
+	assertMaliciousSearchPlan(t, store, ctx, maliciousSearchPlanCase{
+		name: "name and severity", query: maliciousPackageSearchNameSeveritySQL, args: []any{"%aaa-overlap%", "CRITICAL", 201},
+		wantIndex: "idx_malicious_findings_name_trgm", wantIndexOnly: false,
+	})
 
 	for _, index := range []string{"idx_malicious_active_search_order", "idx_malicious_active_severity_search"} {
 		var size int64
@@ -127,8 +135,20 @@ func assertMaliciousSearchExactResults(t *testing.T, store *Store, ctx context.C
 	}
 }
 
-func assertMaliciousSearchPlan(t *testing.T, store *Store, ctx context.Context, name, query string, args []any, wantIndex string, wantIndexOnly bool) {
+// maliciousSearchPlanCase is one malicious-package search query and the index
+// its plan must use (as an Index Only Scan without heap fetches when
+// wantIndexOnly is set).
+type maliciousSearchPlanCase struct {
+	name          string
+	query         string
+	args          []any
+	wantIndex     string
+	wantIndexOnly bool
+}
+
+func assertMaliciousSearchPlan(t *testing.T, store *Store, ctx context.Context, plan maliciousSearchPlanCase) {
 	t.Helper()
+	name, query, args, wantIndex, wantIndexOnly := plan.name, plan.query, plan.args, plan.wantIndex, plan.wantIndexOnly
 
 	var raw []byte
 	if err := store.pool.QueryRow(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+query, args...).Scan(&raw); err != nil {

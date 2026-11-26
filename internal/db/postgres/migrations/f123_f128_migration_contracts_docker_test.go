@@ -42,8 +42,8 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 			before := f123F128Snapshot(t, ctx, db, `SELECT id, ecosystem, name, versions, source, risk_type, severity, summary, description, reference_urls, origin_ref, published, created_at, updated_at, created_by FROM malicious_findings ORDER BY id`)
 			up := f123F128Apply(t, ctx, db, 8, MigrationDirectionUp)
 			f123F128AssertCleanMetadata(t, ctx, db, up, 1)
-			f123F128AssertColumn(t, ctx, db, "malicious_findings", "removed_at", "timestamp with time zone", "YES", "")
-			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", "malicious_findings", false, "removed_at", "")
+			f123F128AssertColumn(t, ctx, db, "malicious_findings", "removed_at", f123F128Column{"timestamp with time zone", "YES", ""})
+			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", f123F128Index{"malicious_findings", false, "removed_at", ""})
 			f123F128AssertNullCount(t, ctx, db, "malicious_findings", "removed_at", 2)
 			f123F128Exec(t, ctx, db, `UPDATE malicious_findings SET removed_at = '2026-01-02T03:04:05Z' WHERE id = 'MAL-REMOVED'`)
 
@@ -58,8 +58,8 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 			f123F128Apply(t, ctx, db, 8, MigrationDirectionDown)
 			f123F128AssertColumnAbsent(t, ctx, db, "malicious_findings", "removed_at")
 			f123F128Apply(t, ctx, db, 8, MigrationDirectionUp)
-			f123F128AssertColumn(t, ctx, db, "malicious_findings", "removed_at", "timestamp with time zone", "YES", "")
-			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", "malicious_findings", false, "removed_at", "")
+			f123F128AssertColumn(t, ctx, db, "malicious_findings", "removed_at", f123F128Column{"timestamp with time zone", "YES", ""})
+			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", f123F128Index{"malicious_findings", false, "removed_at", ""})
 			f123F128AssertNullCount(t, ctx, db, "malicious_findings", "removed_at", 2)
 		})
 
@@ -76,7 +76,7 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 				t.Fatalf("008 up collision error = %v, want idx_malicious_removed_at conflict", err)
 			}
 			f123F128AssertColumnAbsent(t, ctx, db, "malicious_findings", "removed_at")
-			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", "malicious_findings", false, "name", "")
+			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", f123F128Index{"malicious_findings", false, "name", ""})
 			f123F128AssertDirtyMetadata(t, ctx, db, up, started, finished, 1)
 			f123F128AssertRunRefusesDirty(t, ctx, instance.dsn, 8)
 			f123F128AssertColumnAbsent(t, ctx, db, "malicious_findings", "removed_at")
@@ -84,8 +84,8 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 			f123F128ClearDirty(t, ctx, db, 8)
 			f123F128Exec(t, ctx, db, `DROP INDEX idx_malicious_removed_at`)
 			f123F128Apply(t, ctx, db, 8, MigrationDirectionUp)
-			f123F128AssertColumn(t, ctx, db, "malicious_findings", "removed_at", "timestamp with time zone", "YES", "")
-			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", "malicious_findings", false, "removed_at", "")
+			f123F128AssertColumn(t, ctx, db, "malicious_findings", "removed_at", f123F128Column{"timestamp with time zone", "YES", ""})
+			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", f123F128Index{"malicious_findings", false, "removed_at", ""})
 			f123F128AssertTargetEvents(t, ctx, db, up, 2, 1, 1)
 		})
 
@@ -101,8 +101,8 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "other objects depend") {
 				t.Fatalf("008 down dependency error = %v, want dependent-view failure", err)
 			}
-			f123F128AssertColumn(t, ctx, db, "malicious_findings", "removed_at", "timestamp with time zone", "YES", "")
-			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", "malicious_findings", false, "removed_at", "")
+			f123F128AssertColumn(t, ctx, db, "malicious_findings", "removed_at", f123F128Column{"timestamp with time zone", "YES", ""})
+			f123F128AssertIndex(t, ctx, db, "idx_malicious_removed_at", f123F128Index{"malicious_findings", false, "removed_at", ""})
 			f123F128AssertDirtyMetadata(t, ctx, db, down, started, finished, 2)
 			f123F128AssertRunRefusesDirty(t, ctx, instance.dsn, 8)
 
@@ -131,7 +131,7 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 			afterUp := f123F128ReadReputationRows(t, ctx, db)
 			f123F128AssertReputationExclusionsUnchanged(t, ctx, db, before)
 			f123F128AssertReputationConstraint(t, ctx, db)
-			f123F128AssertIndex(t, ctx, db, "idx_reputation_due", "package_reputation_cache", false, "source,ecosystem,name,next_check_at", "status=anyarray['pending','error','malicious','removed','risk','clean','not_found']")
+			f123F128AssertIndex(t, ctx, db, "idx_reputation_due", f123F128Index{"package_reputation_cache", false, "source,ecosystem,name,next_check_at", "status=anyarray['pending','error','malicious','removed','risk','clean','not_found']"})
 
 			f123F128Exec(t, ctx, db, `
 				INSERT INTO package_reputation_cache(ecosystem,name,version,source,status,severity,summary,description,evidence,updated_at) VALUES
@@ -154,7 +154,7 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 				t.Fatalf("009 down changed unmarked, invalid-marker, or non-risk controls\ngot:  %s\nwant: %s", got, controls)
 			}
 			f123F128AssertReputationConstraint(t, ctx, db)
-			f123F128AssertIndex(t, ctx, db, "idx_reputation_due", "package_reputation_cache", false, "source,ecosystem,name,next_check_at", "status=anyarray['pending','error','malicious','removed','clean','not_found']")
+			f123F128AssertIndex(t, ctx, db, "idx_reputation_due", f123F128Index{"package_reputation_cache", false, "source,ecosystem,name,next_check_at", "status=anyarray['pending','error','malicious','removed','clean','not_found']"})
 
 			restored := f123F128Snapshot(t, ctx, db, `SELECT name,status,severity,summary,description,evidence,updated_at FROM package_reputation_cache ORDER BY name`)
 			f123F128Apply(t, ctx, db, 9, MigrationDirectionDown)
@@ -237,8 +237,8 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 			upperBound := f123F128DatabaseClock(t, ctx, db)
 			f123F128AssertCleanMetadata(t, ctx, db, up, 1)
 			f123F128AssertAffectedTimestampContract(t, ctx, db, lowerBound, upperBound)
-			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", "timestamp with time zone", "NO", "now()")
-			f123F128AssertIndex(t, ctx, db, "idx_affected_packages_updated_at", "affected_packages", false, "updated_at", "")
+			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", f123F128Column{"timestamp with time zone", "NO", "now()"})
+			f123F128AssertIndex(t, ctx, db, "idx_affected_packages_updated_at", f123F128Index{"affected_packages", false, "updated_at", ""})
 			var deltaCount int
 			if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM affected_packages WHERE updated_at >= $1`, lowerBound.Add(-time.Second)).Scan(&deltaCount); err != nil {
 				t.Fatalf("count migration-010 delta rows: %v", err)
@@ -282,19 +282,19 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "idx_affected_packages_updated_at") {
 				t.Fatalf("010 up partial failure error = %v, want index-name collision", err)
 			}
-			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", "timestamp with time zone", "NO", "now()")
+			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", f123F128Column{"timestamp with time zone", "NO", "now()"})
 			f123F128AssertRelationKind(t, ctx, db, "idx_affected_packages_updated_at", "r")
 			f123F128AssertDirtyMetadata(t, ctx, db, up, started, finished, 1)
 			f123F128AssertRunRefusesDirty(t, ctx, instance.dsn, 10)
-			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", "timestamp with time zone", "NO", "now()")
+			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", f123F128Column{"timestamp with time zone", "NO", "now()"})
 
 			f123F128ClearDirty(t, ctx, db, 10)
 			f123F128Exec(t, ctx, db, `DROP TABLE idx_affected_packages_updated_at`)
 			f123F128Exec(t, ctx, db, `ALTER TABLE affected_packages DROP COLUMN updated_at`)
 			f123F128AssertColumnAbsent(t, ctx, db, "affected_packages", "updated_at")
 			f123F128Apply(t, ctx, db, 10, MigrationDirectionUp)
-			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", "timestamp with time zone", "NO", "now()")
-			f123F128AssertIndex(t, ctx, db, "idx_affected_packages_updated_at", "affected_packages", false, "updated_at", "")
+			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", f123F128Column{"timestamp with time zone", "NO", "now()"})
+			f123F128AssertIndex(t, ctx, db, "idx_affected_packages_updated_at", f123F128Index{"affected_packages", false, "updated_at", ""})
 			f123F128AssertTargetEvents(t, ctx, db, up, 2, 1, 1)
 		})
 
@@ -314,14 +314,14 @@ func TestF123F128MigrationContractsAgainstPostgres(t *testing.T) {
 				t.Fatalf("010 down partial failure error = %v, want dependent-view failure", err)
 			}
 			f123F128AssertRelationAbsent(t, ctx, db, "idx_affected_packages_updated_at")
-			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", "timestamp with time zone", "NO", "now()")
+			f123F128AssertColumn(t, ctx, db, "affected_packages", "updated_at", f123F128Column{"timestamp with time zone", "NO", "now()"})
 			f123F128AssertDirtyMetadata(t, ctx, db, down, started, finished, 2)
 			f123F128AssertRunRefusesDirty(t, ctx, instance.dsn, 10)
 
 			f123F128ClearDirty(t, ctx, db, 10)
 			f123F128Exec(t, ctx, db, `CREATE INDEX CONCURRENTLY idx_affected_packages_updated_at ON affected_packages(updated_at)`)
 			f123F128Exec(t, ctx, db, `DROP VIEW f123_f128_affected_updated_view`)
-			f123F128AssertIndex(t, ctx, db, "idx_affected_packages_updated_at", "affected_packages", false, "updated_at", "")
+			f123F128AssertIndex(t, ctx, db, "idx_affected_packages_updated_at", f123F128Index{"affected_packages", false, "updated_at", ""})
 			f123F128Apply(t, ctx, db, 10, MigrationDirectionDown)
 			f123F128AssertColumnAbsent(t, ctx, db, "affected_packages", "updated_at")
 			f123F128AssertRelationAbsent(t, ctx, db, "idx_affected_packages_updated_at")
@@ -670,8 +670,16 @@ func f123F128AssertAffectedTimestampContract(t *testing.T, ctx context.Context, 
 	}
 }
 
-func f123F128AssertColumn(t *testing.T, ctx context.Context, db *sql.DB, table, column, dataType, nullable, defaultValue string) {
+// f123F128Column is the expected information_schema shape of one column.
+type f123F128Column struct {
+	dataType     string
+	nullable     string
+	defaultValue string
+}
+
+func f123F128AssertColumn(t *testing.T, ctx context.Context, db *sql.DB, table, column string, want f123F128Column) {
 	t.Helper()
+	dataType, nullable, defaultValue := want.dataType, want.nullable, want.defaultValue
 	var gotType, gotNullable, gotDefault string
 	if err := db.QueryRowContext(ctx, `SELECT data_type,is_nullable,COALESCE(column_default,'') FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name=$2`, table, column).Scan(&gotType, &gotNullable, &gotDefault); err != nil {
 		t.Fatalf("inspect column %s.%s: %v", table, column, err)
@@ -692,8 +700,18 @@ func f123F128AssertColumnAbsent(t *testing.T, ctx context.Context, db *sql.DB, t
 	}
 }
 
-func f123F128AssertIndex(t *testing.T, ctx context.Context, db *sql.DB, name, table string, unique bool, keys, predicate string) {
+// f123F128Index is the expected definition of one index: its table, whether
+// it is unique, its comma-separated key columns and its partial predicate.
+type f123F128Index struct {
+	table     string
+	unique    bool
+	keys      string
+	predicate string
+}
+
+func f123F128AssertIndex(t *testing.T, ctx context.Context, db *sql.DB, name string, want f123F128Index) {
 	t.Helper()
+	table, unique, keys, predicate := want.table, want.unique, want.keys, want.predicate
 	var gotTable, gotKeys, gotPredicate string
 	var gotUnique, valid, ready bool
 	if err := db.QueryRowContext(ctx, `

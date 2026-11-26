@@ -202,7 +202,7 @@ func TestF133F138MigrationContractsAgainstPostgres(t *testing.T) {
 
 			up := f133F138Apply(t, leaf, 14, MigrationDirectionUp)
 			f133F138AssertEvidenceCatalog(t, leaf, true)
-			f133F138AssertEvidence(t, leaf, "f136-historical", false, "", "", "", `{}`, `[]`, `[]`, 0)
+			f133F138AssertEvidence(t, leaf, "f136-historical", f133F138Evidence{versions: `{}`, ids: `[]`, severities: `[]`})
 			for column := range f133F138EvidenceColumns {
 				_, nullErr := leaf.conn.ExecContext(leaf.ctx, `UPDATE scan_log SET `+f133F138QuoteIdentifier(column)+`=NULL WHERE scan_id='f136-historical'`)
 				f133F138ExpectSQLState(t, nullErr, "23502")
@@ -210,7 +210,11 @@ func TestF133F138MigrationContractsAgainstPostgres(t *testing.T) {
 			f133F138Exec(t, leaf, `
 				INSERT INTO scan_log(scan_id,repo_name,scanned_at,packages_count,findings_count,duration_ms,findings_blocking,block_threshold,correlation_id,feed_status,feed_versions,finding_ids,finding_severities,manual_advisories_count)
 				VALUES('f136-evidence','org/evidence','2026-05-06T07:08:09Z',8,3,456,true,'HIGH','corr-evidence','degraded','{"ghsa":"2026-05-01","osv":"2026-05-02"}'::jsonb,'["GHSA-1","OSV-2"]'::jsonb,'["CRITICAL","HIGH"]'::jsonb,4)`)
-			f133F138AssertEvidence(t, leaf, "f136-evidence", true, "HIGH", "corr-evidence", "degraded", `{"ghsa": "2026-05-01", "osv": "2026-05-02"}`, `["GHSA-1", "OSV-2"]`, `["CRITICAL", "HIGH"]`, 4)
+			f133F138AssertEvidence(t, leaf, "f136-evidence", f133F138Evidence{
+				blocking: true, threshold: "HIGH", correlationID: "corr-evidence", status: "degraded",
+				versions: `{"ghsa": "2026-05-01", "osv": "2026-05-02"}`, ids: `["GHSA-1", "OSV-2"]`, severities: `["CRITICAL", "HIGH"]`,
+				manual: 4,
+			})
 			if got := f133F138Snapshot(t, leaf, `SELECT id,scan_id,repo_name,scanned_at,packages_count,findings_count,duration_ms,client_ip,client_version,api_key_id,api_key_name FROM scan_log WHERE scan_id='f136-historical' ORDER BY id`); got != before {
 				t.Fatalf("014 upgrade did not preserve historical scan metadata\ngot:  %s\nwant historical row: %s", got, before)
 			}
@@ -237,7 +241,7 @@ func TestF133F138MigrationContractsAgainstPostgres(t *testing.T) {
 				t.Fatalf("reapply 014 up: %v", err)
 			}
 			f133F138AssertEvidenceCatalog(t, leaf, true)
-			f133F138AssertEvidence(t, leaf, "f135-cycle", false, "", "", "", `{}`, `[]`, `[]`, 0)
+			f133F138AssertEvidence(t, leaf, "f135-cycle", f133F138Evidence{versions: `{}`, ids: `[]`, severities: `[]`})
 			f133F138AssertEvents(t, leaf, 14, []f133F138Event{
 				{name: up.name, checksum: migrationChecksum(up.sql), success: true},
 				{name: down.name, checksum: migrationChecksum(down.sql), success: true},
@@ -408,7 +412,7 @@ func TestF133F138MigrationContractsAgainstPostgres(t *testing.T) {
 		up13 := f133F138Apply(t, leaf, 13, MigrationDirectionUp)
 		up14 := f133F138Apply(t, leaf, 14, MigrationDirectionUp)
 		up15 := f133F138Apply(t, leaf, 15, MigrationDirectionUp)
-		f133F138AssertEvidence(t, leaf, "f138-ordered", false, "", "", "", `{}`, `[]`, `[]`, 0)
+		f133F138AssertEvidence(t, leaf, "f138-ordered", f133F138Evidence{versions: `{}`, ids: `[]`, severities: `[]`})
 		f133F138AssertDigest(t, leaf, "f138-ordered", "")
 		f133F138AssertEventsAfter(t, leaf, marker, []f133F138Event{
 			{name: down15.name, checksum: migrationChecksum(down15.sql), success: true},
@@ -635,8 +639,23 @@ func f133F138AssertMaliciousRanges(t *testing.T, leaf f133F138Leaf, want map[str
 	}
 }
 
-func f133F138AssertEvidence(t *testing.T, leaf f133F138Leaf, scanID string, blocking bool, threshold, correlationID, status, versions, ids, severities string, manual int) {
+// f133F138Evidence is the expected scan_log decision evidence of one scan;
+// versions, ids and severities are JSON documents compared by value.
+type f133F138Evidence struct {
+	blocking      bool
+	threshold     string
+	correlationID string
+	status        string
+	versions      string
+	ids           string
+	severities    string
+	manual        int
+}
+
+func f133F138AssertEvidence(t *testing.T, leaf f133F138Leaf, scanID string, want f133F138Evidence) {
 	t.Helper()
+	blocking, threshold, correlationID, status := want.blocking, want.threshold, want.correlationID, want.status
+	versions, ids, severities, manual := want.versions, want.ids, want.severities, want.manual
 	var gotBlocking bool
 	var gotThreshold, gotCorrelationID, gotStatus, gotVersions, gotIDs, gotSeverities string
 	var gotManual int
