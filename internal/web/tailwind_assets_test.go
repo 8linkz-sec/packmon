@@ -2676,8 +2676,8 @@ func TestAdminAPIKeyCopyHasAccessibleStatusFeedback(t *testing.T) {
 		`API key copied to clipboard.`,
 		`Copy failed. API key selected for manual copying.`,
 		`Clipboard unavailable. API key selected for manual copying.`,
-		`var clipboardWrite = navigator.clipboard.writeText(target.value || "");`,
-		`void Promise.resolve(clipboardWrite).then`,
+		`resolve(navigator.clipboard.writeText(target.value || ""));`,
+		`void new Promise(function (resolve) {`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("form-actions.js copy behavior missing status feedback %q:\n%s", want, script)
@@ -3075,7 +3075,7 @@ func TestAdminAPIKeyCopyHandlesClipboardWriteRejections(t *testing.T) {
 	t.Parallel()
 
 	script := readTextFile(t, "static", "form-actions.js")
-	writeCall := `var clipboardWrite = navigator.clipboard.writeText(target.value || "");`
+	writeCall := `resolve(navigator.clipboard.writeText(target.value || ""));`
 	writeAt := strings.Index(script, writeCall)
 	if writeAt < 0 {
 		t.Fatalf("form-actions.js copy behavior missing clipboard Promise handling %q:\n%s", writeCall, script)
@@ -3122,11 +3122,11 @@ func TestAdminAPIKeyCopyHandlesSynchronousClipboardErrors(t *testing.T) {
 	script := readTextFile(t, "static", "form-actions.js")
 	for _, want := range []string{
 		`function handleCopyFailure(status, target)`,
-		`try {`,
-		`var clipboardWrite = navigator.clipboard.writeText(target.value || "");`,
-		`void Promise.resolve(clipboardWrite).then(function () {`,
+		`void new Promise(function (resolve) {`,
+		`resolve(navigator.clipboard.writeText(target.value || ""));`,
+		`}).then(function () {`,
+		`}).catch(function () {`,
 		`handleCopyFailure(status, target);`,
-		`} catch {`,
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("form-actions.js copy behavior missing robust clipboard error handling %q:\n%s", want, script)
