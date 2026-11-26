@@ -85,3 +85,77 @@ go-test-race:
 # follows its line tag (no digest) so every pipeline pulls the line's current patch release.
 golangci-lint:
   image: golangci/golangci-lint:v2.15
+
+# Tag-gated suites (the Makefile's test-e2e, test-integration and the tagged vet; DESIGN.md "CI/CD Integration").
+# scripts/tagged-test-packages.sh lists every package with a test file built only under the tag (tests/ci pins it
+# to the inventory the Makefile targets are checked against), so a new tagged test package runs here without a
+# pipeline edit.
+
+# Compile and vet check of every integration- and e2e-tagged file (the Makefile's TAGGED_LINT_DIRS). The tagged
+# golangci-lint pass of `make lint` is not wired yet: it still reports existing findings (Todo.txt "golangci-lint
+# with the `integration` build tag reports 35 existing issues").
+go-vet-tagged:
+  extends: .go-base
+  stage: test
+  script:
+    - packages=$(bash scripts/tagged-test-packages.sh integration e2e)
+    - go vet -tags integration,e2e $packages
+
+# `make test-e2e`: the built CLI and a headless Chromium (.packmon-test-tools sets PACKMON_BROWSER_BIN). The browser
+# test skips when it finds no browser, and a skip must not pass as coverage: the job fails on any skipped test.
+go-test-e2e:
+  extends: [.go-base, .packmon-test-tools]
+  stage: test
+  script:
+    - make build
+    - packages=$(bash scripts/tagged-test-packages.sh e2e)
+    - |
+      status=0
+      PACKMON_TEST_BIN_DIR="$CI_PROJECT_DIR" go test -count=1 -v -timeout=10m -tags e2e $packages > /tmp/e2e-test.log 2>&1 || status=1
+      cat /tmp/e2e-test.log
+      if grep -n -- '--- SKIP' /tmp/e2e-test.log; then
+        echo "e2e tests were skipped (missing browser or tool); every e2e test must run in CI"
+        status=1
+      fi
+      exit "$status"
+
+# `make test-integration` against two PostgreSQL services instead of per-test `docker run` containers (the runners
+# have no Docker daemon). The harnesses read PACKMON_TEST_POSTGRES_URL / PACKMON_TEST_POSTGRES_PLAIN_URL and reset
+# the server like a fresh container for every test, so the packages run one at a time (-p 1). The services start
+# exactly like the harness containers: same image, same user, and the same -c options for the preloaded one; the
+# throwaway password belongs to job-local services without a published port. Tests that need a Docker daemon are
+# skipped by name from .gitlab/integration-docker-only.txt (each with its reason, checked by tests/ci).
+# Every push: the run takes about 3 minutes (local measurement 2026-11-26, TESTING.md "CI integration and e2e
+# jobs"), comparable to go-test-race.
+go-test-integration:
+  extends: .go-base
+  stage: test
+  services:
+    - name: &packmon-test-postgres-image cgr.dev/chainguard/postgres:18@sha256:f4b066118f70efeb519d2aac94507f898698f4a145ecb43dd8fd4076f21b1124
+      alias: postgres
+      command:
+        - "-c"
+        - "shared_preload_libraries=pg_stat_statements"
+        - "-c"
+        - "compute_query_id=on"
+        - "-c"
+        - "track_io_timing=on"
+        - "-c"
+        - "pg_stat_statements.track=top"
+        - "-c"
+        - "pg_stat_statements.track_utility=off"
+      variables: &packmon-test-postgres-env
+        POSTGRES_DB: packmon
+        POSTGRES_USER: packmon
+        POSTGRES_PASSWORD: packmon
+    - name: *packmon-test-postgres-image
+      alias: postgres-plain
+      variables: *packmon-test-postgres-env
+  variables:
+    PACKMON_TEST_POSTGRES_URL: postgres://packmon:packmon@postgres:5432/postgres?sslmode=disable
+    PACKMON_TEST_POSTGRES_PLAIN_URL: postgres://packmon:packmon@postgres-plain:5432/postgres?sslmode=disable
+  script:
+    - make build build-server
+    - packages=$(bash scripts/tagged-test-packages.sh integration)
+    - docker_only=$(grep -v -e '^#' -e '^[[:space:]]*$' .gitlab/integration-docker-only.txt | sed 's/[[:space:]]*#.*//' | paste -sd '|' -)
+    - PACKMON_TEST_BIN_DIR="$CI_PROJECT_DIR" go test -count=1 -p 1 -timeout=30m -tags integration -skip "^(${docker_only})\$" $packages

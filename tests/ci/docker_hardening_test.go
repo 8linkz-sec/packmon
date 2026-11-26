@@ -805,6 +805,11 @@ func TestDeploymentAndIntegrationContainerImagesAreDigestPinned(t *testing.T) {
 			rel:  filepath.Join("tests", "integration", "compose_runtime_contract_test.go"),
 			want: `composeRuntimePostgresImage = "` + hardenedPostgresImage + `"`,
 		},
+		{
+			// The go-test-integration job's services replace the containers the harnesses above start.
+			rel:  ".gitlab-ci.yml",
+			want: "&packmon-test-postgres-image " + hardenedPostgresImage + "\n",
+		},
 	} {
 		path := filepath.Join("..", "..", tc.rel)
 		data, err := os.ReadFile(path) //nolint:gosec // static repository fixture path
