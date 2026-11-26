@@ -25,6 +25,18 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// Flag names shared by the scan and db sync commands, and the report-mode
+// flags whose combinations scan validates.
+const (
+	apiKeyFlagName            = "api-key"
+	webhookSecretFlagName     = "webhook-secret"
+	insecureAllowHTTPFlagName = "insecure-allow-http"
+
+	reportModeListPackages = "--list-packages"
+	reportModeOutdated     = "--outdated"
+	reportModeListAll      = "--list-all"
+)
+
 func newScanCmd() *cobra.Command {
 	var (
 		flagMode           string
@@ -102,10 +114,10 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 				SBOMOnly:     flagSBOMOnly,
 			}
 			if err := rejectHookWithReportModes(flagHook, map[string]bool{
-				"--list-packages": flagListPackages,
-				"--outdated":      flagOutdated,
-				"--list-all":      flagListAll,
-				"--auto-sbom":     flagAutoSBOM,
+				reportModeListPackages: flagListPackages,
+				reportModeOutdated:     flagOutdated,
+				reportModeListAll:      flagListAll,
+				"--auto-sbom":          flagAutoSBOM,
 			}); err != nil {
 				return withExitCode(ExitOperational, err)
 			}
@@ -125,14 +137,14 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 				return withExitCode(ExitOperational, fmt.Errorf("--list-all-offline can only be used with --list-all"))
 			}
 			if flagListPackages {
-				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, "--list-packages")
+				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, reportModeListPackages)
 				if err != nil {
 					return err
 				}
 				return withDefaultExitCode(ExitOperational, runListPackagesWithSettings(settings))
 			}
 			if flagOutdated {
-				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, "--outdated")
+				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, reportModeOutdated)
 				if err != nil {
 					return err
 				}
@@ -149,7 +161,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 				}))
 			}
 			if flagListAll {
-				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, "--list-all")
+				settings, err := resolveSingleTargetScanSettings(cmd, args, scanFlags, reportModeListAll)
 				if err != nil {
 					return err
 				}
@@ -169,7 +181,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 	f := cmd.Flags()
 	f.StringVar(&flagMode, "mode", "auto", "scan mode (local|remote|auto)")
 	f.StringVar(&flagServer, "server", "", "feed server URL")
-	f.StringVar(&flagAPIKey, "api-key", "", "deprecated: use PACKMON_API_KEY or api_key_env; command-line secrets are rejected by default")
+	f.StringVar(&flagAPIKey, apiKeyFlagName, "", "deprecated: use PACKMON_API_KEY or api_key_env; command-line secrets are rejected by default")
 	f.StringVar(&flagFailOn, "fail-on", "CRITICAL", "block on vulnerability severity (CRITICAL|HIGH|MEDIUM|LOW|NONE); NONE disables vulnerability blocking only; malicious and active supply-chain risk findings still block")
 	f.StringVar(&flagEcosystems, "ecosystems", "", "comma-separated ecosystem filter")
 	f.IntVar(&flagMaxDepth, "max-depth", 10, "directory walk depth")
@@ -180,7 +192,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 	f.StringVar(&flagOutputJUnit, "output-junit", "", "write JUnit XML results to file")
 	f.StringVar(&flagOutputHTML, "html", "", "write a self-contained HTML report to file")
 	f.StringVar(&flagWebhookURL, "webhook-url", "", "webhook URL to POST results to")
-	f.StringVar(&flagWebhookSecret, "webhook-secret", "", "deprecated: use PACKMON_WEBHOOK_SECRET or config webhook secret; command-line secrets are rejected by default")
+	f.StringVar(&flagWebhookSecret, webhookSecretFlagName, "", "deprecated: use PACKMON_WEBHOOK_SECRET or config webhook secret; command-line secrets are rejected by default")
 	f.BoolVar(&flagAll, "all", false, "scan all repositories configured in .packmon.yaml")
 	f.StringVar(&flagRepo, "repo", "", "scan a configured repository by name")
 	f.BoolVar(&flagListPackages, "list-packages", false, "list all detected packages and exit (no vulnerability check)")
@@ -188,7 +200,7 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 	f.BoolVar(&flagListAll, "list-all", false, "list findings, then all packages with available-update info")
 	f.BoolVar(&flagListAllOffline, "list-all-offline", false, "with --list-all: skip external latest-version and Docker digest lookups")
 	f.StringVar(&flagCACert, "cacert", "", "path to a PEM CA bundle used to verify the server's TLS certificate")
-	f.BoolVar(&flagInsecureHTTP, "insecure-allow-http", false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
+	f.BoolVar(&flagInsecureHTTP, insecureAllowHTTPFlagName, false, "allow plain http:// server URLs (sends bearer token in cleartext; opt-in)")
 	f.BoolVar(&flagRequireRemote, "require-remote", false, "in auto mode, fail hard on remote error instead of falling back to the local database")
 	f.BoolVar(&flagNoRepoMetadata, "no-repo-metadata", false, "omit optional repository metadata from remote scan requests and webhooks")
 	f.StringArrayVar(&flagSBOMFiles, "sbom", nil, "SBOM file to include as package input (CycloneDX JSON/XML or SPDX JSON); can be repeated")
@@ -204,13 +216,13 @@ packages, supply-chain risk findings, and lifecycle risks.`,
 func validateScanReportModeFlags(listPackages, outdated, listAll bool) error {
 	var modes []string
 	if listPackages {
-		modes = append(modes, "--list-packages")
+		modes = append(modes, reportModeListPackages)
 	}
 	if outdated {
-		modes = append(modes, "--outdated")
+		modes = append(modes, reportModeOutdated)
 	}
 	if listAll {
-		modes = append(modes, "--list-all")
+		modes = append(modes, reportModeListAll)
 	}
 	if len(modes) > 1 {
 		return fmt.Errorf("choose only one report mode flag: %s", strings.Join(modes, ", "))
@@ -653,16 +665,16 @@ func uninformativeTargetName(name string) bool {
 }
 
 func resolveScanSettings(cmd *cobra.Command, cfg *cliConfig, target scanTarget, flags scanFlagValues) (scanSettings, error) {
-	if err := rejectSecretFlagValue(cmd, "api-key", "PACKMON_API_KEY or config api_key_env"); err != nil {
+	if err := rejectSecretFlagValue(cmd, apiKeyFlagName, "PACKMON_API_KEY or config api_key_env"); err != nil {
 		return scanSettings{}, err
 	}
-	if err := rejectSecretFlagValue(cmd, "webhook-secret", "PACKMON_WEBHOOK_SECRET or config webhook secret"); err != nil {
+	if err := rejectSecretFlagValue(cmd, webhookSecretFlagName, "PACKMON_WEBHOOK_SECRET or config webhook secret"); err != nil {
 		return scanSettings{}, err
 	}
 
 	envAPIKey := strings.TrimSpace(os.Getenv("PACKMON_API_KEY"))
 	settings := defaultScanSettings(target, flags)
-	skipConfigAPIKeyEnv := envAPIKey != "" || commandFlagChanged(cmd, "api-key")
+	skipConfigAPIKeyEnv := envAPIKey != "" || commandFlagChanged(cmd, apiKeyFlagName)
 
 	if err := applyScanConfigSettings(&settings, cfg, skipConfigAPIKeyEnv); err != nil {
 		return scanSettings{}, err
@@ -921,7 +933,7 @@ func applyScanCoreFlagSettings(settings *scanSettings, cmd *cobra.Command, flags
 	if commandFlagChanged(cmd, "server") {
 		settings.ServerURL = strings.TrimSpace(flags.Server)
 	}
-	if commandFlagChanged(cmd, "api-key") {
+	if commandFlagChanged(cmd, apiKeyFlagName) {
 		settings.APIKey = strings.TrimSpace(flags.APIKey)
 	}
 	if commandFlagChanged(cmd, "fail-on") {
@@ -948,13 +960,13 @@ func applyScanRemoteFlagSettings(settings *scanSettings, cmd *cobra.Command, fla
 	if commandFlagChanged(cmd, "webhook-url") {
 		settings.WebhookURL = strings.TrimSpace(flags.WebhookURL)
 	}
-	if commandFlagChanged(cmd, "webhook-secret") {
+	if commandFlagChanged(cmd, webhookSecretFlagName) {
 		settings.WebhookSecret = strings.TrimSpace(flags.WebhookSecret)
 	}
 	if commandFlagChanged(cmd, "cacert") {
 		settings.CACertFile = strings.TrimSpace(flags.CACert)
 	}
-	if commandFlagChanged(cmd, "insecure-allow-http") {
+	if commandFlagChanged(cmd, insecureAllowHTTPFlagName) {
 		settings.InsecureHTTP = flags.InsecureHTTP
 	}
 	if commandFlagChanged(cmd, "require-remote") {

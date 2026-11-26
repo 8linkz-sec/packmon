@@ -18,6 +18,11 @@ import (
 const (
 	clientCACertFileEnv       = "PACKMON_CA_CERT_FILE"
 	clientCACertLegacyFileEnv = "PACKMON_CA_CERT"
+	// configFileFlagUsage is the help text of the config subcommands' --file flag.
+	configFileFlagUsage = "path to config file (default: .packmon.yaml)"
+	// redactedURLPlaceholder is the value logsafe.RedactURL returns for a URL it
+	// cannot display safely.
+	redactedURLPlaceholder = "(redacted-url)"
 )
 
 func newConfigCmd() *cobra.Command {
@@ -63,19 +68,19 @@ func newConfigShowCmd() *cobra.Command {
 			show := termtext.Sanitize
 			fmt.Printf("config_file:  %s\n", show(valueOrDefault(configPath, "(none)")))
 			if cfg != nil {
-				fmt.Printf("server:       %s\n", show(valueOrDefault(logsafe.RedactURL(effective.Server), "(not set)")))
+				fmt.Printf("server:       %s\n", show(valueOrDefault(logsafe.RedactURL(effective.Server), notSetPlaceholder)))
 				fmt.Printf("api_key:      %s\n", show(maskSecret(effective.APIKey)))
-				fmt.Printf("api_key_env:  %s\n", show(valueOrDefault(effective.APIKeyEnv, "(not set)")))
+				fmt.Printf("api_key_env:  %s\n", show(valueOrDefault(effective.APIKeyEnv, notSetPlaceholder)))
 				fmt.Printf("mode:         %s\n", show(effective.Mode))
 				fmt.Printf("fail_on:      %s\n", show(effective.FailOn))
 				fmt.Printf("timeout:      %ds\n", effective.Timeout)
 				fmt.Printf("ecosystems:   %s\n", show(valueOrDefault(strings.Join(effective.Ecosystems, ","), "(all)")))
 				fmt.Printf("include_dev:  %v\n", effective.IncludeDev)
-				fmt.Printf("cacert:       %s\n", show(valueOrDefault(effective.CACertFile, "(not set)")))
+				fmt.Printf("cacert:       %s\n", show(valueOrDefault(effective.CACertFile, notSetPlaceholder)))
 				fmt.Printf("insecure_allow_http: %v\n", effective.InsecureHTTP)
 				fmt.Printf("require_remote: %v\n", effective.RequireRemote)
 				fmt.Printf("send_repo_metadata: %v\n", effective.SendRepoMetadata)
-				fmt.Printf("webhook_url:  %s\n", show(valueOrDefault(logsafe.RedactURL(effective.WebhookURL), "(not set)")))
+				fmt.Printf("webhook_url:  %s\n", show(valueOrDefault(logsafe.RedactURL(effective.WebhookURL), notSetPlaceholder)))
 				fmt.Printf("webhook_secret: %s\n", show(maskSecret(effective.WebhookSecret)))
 				fmt.Printf("db_path:      %s\n", show(valueOrDefault(effective.DBPath, "(unresolved: home directory unknown; set PACKMON_DB_PATH or db.path)")))
 				fmt.Printf("repos:        %d\n", len(cfg.Repos))
@@ -128,7 +133,7 @@ func newConfigShowCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&flagPath, "file", "", "path to config file (default: .packmon.yaml)")
+	cmd.Flags().StringVar(&flagPath, "file", "", configFileFlagUsage)
 	return cmd
 }
 
@@ -248,7 +253,7 @@ repos:
 		},
 	}
 
-	cmd.Flags().StringVar(&flagPath, "file", "", "path to config file (default: .packmon.yaml)")
+	cmd.Flags().StringVar(&flagPath, "file", "", configFileFlagUsage)
 	return cmd
 }
 
@@ -293,7 +298,7 @@ func newConfigValidateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&flagPath, "file", "", "path to config file (default: .packmon.yaml)")
+	cmd.Flags().StringVar(&flagPath, "file", "", configFileFlagUsage)
 
 	return cmd
 }
@@ -397,7 +402,7 @@ func applyConfigShowFileWebhook(settings *configShowSettings, cfg *cliConfig) {
 
 func applyConfigShowFileDB(settings *configShowSettings, cfg *cliConfig) {
 	if cfg.DB.Path != "" {
-		settings.DBPath = filepath.Join(cfg.DB.Path, "packmon.db")
+		settings.DBPath = filepath.Join(cfg.DB.Path, localDBFileName)
 	}
 }
 
@@ -486,7 +491,7 @@ func applyConfigShowEnvironmentWebhook(settings *configShowSettings) {
 
 func applyConfigShowEnvironmentDB(settings *configShowSettings) {
 	if envDBPath := configShowEnvValue("PACKMON_DB_PATH"); envDBPath != "" {
-		settings.DBPath = filepath.Join(envDBPath, "packmon.db")
+		settings.DBPath = filepath.Join(envDBPath, localDBFileName)
 	}
 }
 
@@ -517,7 +522,7 @@ func printEnvVarMasked(key string) {
 func printEnvVarWithMask(key string, forceSecret bool) {
 	v := os.Getenv(key)
 	if v == "" {
-		v = "(not set)"
+		v = notSetPlaceholder
 	} else if isURLSecretEnvVar(key) {
 		v = logsafe.RedactURL(v)
 	} else if isRegistryURLEnvVar(key) {
@@ -582,16 +587,16 @@ func redactRegistryEnvValue(key, value string) string {
 	if upper == "PACKMON_DOCKER_REGISTRY_MIRRORS" {
 		parts := splitCSV(value)
 		if len(parts) == 0 {
-			return "(redacted-url)"
+			return redactedURLPlaceholder
 		}
 		for index, part := range parts {
 			name, mirror, found := strings.Cut(part, "=")
 			if !found || strings.TrimSpace(name) == "" {
-				return "(redacted-url)"
+				return redactedURLPlaceholder
 			}
 			redactedMirror := redactRegistryURL(mirror)
-			if redactedMirror == "(redacted-url)" {
-				return "(redacted-url)"
+			if redactedMirror == redactedURLPlaceholder {
+				return redactedURLPlaceholder
 			}
 			parts[index] = strings.TrimSpace(name) + "=" + redactedMirror
 		}
@@ -600,12 +605,12 @@ func redactRegistryEnvValue(key, value string) string {
 	if upper == "PACKMON_CHOCOLATEY_FEED_URLS" {
 		parts := splitCSV(value)
 		if len(parts) == 0 {
-			return "(redacted-url)"
+			return redactedURLPlaceholder
 		}
 		for index, part := range parts {
 			redactedURL := redactRegistryURL(part)
-			if redactedURL == "(redacted-url)" {
-				return "(redacted-url)"
+			if redactedURL == redactedURLPlaceholder {
+				return redactedURLPlaceholder
 			}
 			parts[index] = redactedURL
 		}
@@ -617,7 +622,7 @@ func redactRegistryEnvValue(key, value string) string {
 func redactRegistryURL(raw string) string {
 	parsed, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-		return "(redacted-url)"
+		return redactedURLPlaceholder
 	}
 	parsed.User = nil
 	parsed.Fragment = ""
@@ -625,7 +630,7 @@ func redactRegistryURL(raw string) string {
 	if parsed.RawQuery != "" {
 		query, queryErr := url.ParseQuery(parsed.RawQuery)
 		if queryErr != nil {
-			return "(redacted-url)"
+			return redactedURLPlaceholder
 		}
 		for name, values := range query {
 			for index := range values {

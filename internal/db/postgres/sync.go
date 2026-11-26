@@ -524,7 +524,7 @@ func (q syncVulnerabilityQueryArgs) changedIDsCTE() string {
 		SELECT ap.vulnerability_id AS id
 		FROM affected_packages ap
 		WHERE %[2]s
-		  AND ap.updated_at <= $1%[4]s`, syncXIDAtOrAfterSQL("v.xmin", sinceXID), syncXIDAtOrAfterSQL("ap.xmin", sinceXID), vulnerabilityUpperFilter, affectedUpperFilter)
+		  AND ap.updated_at <= $1%[4]s`, syncXIDAtOrAfterSQL(syncVulnerabilityXminColumn, sinceXID), syncXIDAtOrAfterSQL("ap.xmin", sinceXID), vulnerabilityUpperFilter, affectedUpperFilter)
 	}
 	query += `
 	)`
@@ -553,8 +553,12 @@ func (q syncVulnerabilityQueryArgs) addSnapshotXIDFilters(query *string) {
 	if q.snapshotXIDArg == 0 {
 		return
 	}
-	*query += ` AND ` + syncXIDBeforeSQL("v.xmin", fmt.Sprintf("$%d", q.snapshotXIDArg))
+	*query += ` AND ` + syncXIDBeforeSQL(syncVulnerabilityXminColumn, fmt.Sprintf("$%d", q.snapshotXIDArg))
 }
+
+// syncVulnerabilityXminColumn is the row-version column of the vulnerabilities
+// table under its sync query alias v.
+const syncVulnerabilityXminColumn = "v.xmin"
 
 // syncVulnerabilityColumnsSQL is the exported column list of one affected
 // package row, in the order scanSyncVulnerabilityDest scans it. The affected
@@ -856,7 +860,7 @@ func buildSyncSplitAdvisoryUnchangedQuery(id string, snapshot time.Time, snapsho
 		SELECT 1 FROM vulnerabilities v
 		WHERE v.id = $2
 		  AND v.updated_at <= $1
-		  AND NOT ` + syncXIDAtOrAfterSQL("v.xmin", "$3") + `
+		  AND NOT ` + syncXIDAtOrAfterSQL(syncVulnerabilityXminColumn, "$3") + `
 	) AND NOT EXISTS (
 		SELECT 1 FROM affected_packages ap
 		WHERE ap.vulnerability_id = $2

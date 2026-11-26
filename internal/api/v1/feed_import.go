@@ -15,6 +15,13 @@ import (
 	"github.com/8linkz-sec/packmon/internal/requestctx"
 )
 
+// Log message and response text when a rejected import's status cannot be
+// recorded.
+const (
+	feedImportRejectStatusFailedLogMessage = "feed import reject status failed"
+	feedImportRejectStatusUnrecordedText   = "feed import rejected but reject status could not be recorded"
+)
+
 // FeedImportStore is the write-side persistence surface for external feed
 // imports. It is intentionally separate from Store so scan/read API handlers do
 // not depend on feed-ingestion mutations.
@@ -165,8 +172,8 @@ func (h *FeedImportHandler) HandleImport(w http.ResponseWriter, r *http.Request)
 			message := "invalid JSON body: " + decodeErr.Error()
 			h.logger.Warn("feed import: invalid "+bodyName+" body", "feed", feed, "error", decodeErr.Unwrap(), "correlation_id", correlationID)
 			if statusErr := h.recordRejectedFeedImportStatus(r, feed, message, 1, correlationID); statusErr != nil {
-				h.logger.Error("feed import reject status failed", "feed", feed, "error", statusErr, "correlation_id", correlationID)
-				errorResponseForRequest(w, r, http.StatusInternalServerError, "feed import rejected but reject status could not be recorded")
+				h.logger.Error(feedImportRejectStatusFailedLogMessage, "feed", feed, "error", statusErr, "correlation_id", correlationID)
+				errorResponseForRequest(w, r, http.StatusInternalServerError, feedImportRejectStatusUnrecordedText)
 				return
 			}
 			errorResponseForRequest(w, r, http.StatusBadRequest, message)
@@ -177,8 +184,8 @@ func (h *FeedImportHandler) HandleImport(w http.ResponseWriter, r *http.Request)
 		if errors.As(err, &validationErr) {
 			h.logger.Warn("feed import validation failed", "feed", feed, "error", validationErr, "correlation_id", correlationID)
 			if statusErr := h.recordRejectedFeedImportStatus(r, feed, validationErr.Error(), entriesTotal, correlationID); statusErr != nil {
-				h.logger.Error("feed import reject status failed", "feed", feed, "error", statusErr, "correlation_id", correlationID)
-				errorResponseForRequest(w, r, http.StatusInternalServerError, "feed import rejected but reject status could not be recorded")
+				h.logger.Error(feedImportRejectStatusFailedLogMessage, "feed", feed, "error", statusErr, "correlation_id", correlationID)
+				errorResponseForRequest(w, r, http.StatusInternalServerError, feedImportRejectStatusUnrecordedText)
 				return
 			}
 			errorResponseForRequest(w, r, http.StatusBadRequest, validationErr.Error())
@@ -191,8 +198,8 @@ func (h *FeedImportHandler) HandleImport(w http.ResponseWriter, r *http.Request)
 		if errors.Is(err, db.ErrInvalidFeedImportData) {
 			h.logger.Warn("feed import rejected by store validation", "feed", feed, "error", err, "correlation_id", correlationID)
 			if statusErr := h.recordRejectedFeedImportStatus(r, feed, feedImportStoreRejectedMessage, entriesTotal, correlationID); statusErr != nil {
-				h.logger.Error("feed import reject status failed", "feed", feed, "error", statusErr, "correlation_id", correlationID)
-				errorResponseForRequest(w, r, http.StatusInternalServerError, "feed import rejected but reject status could not be recorded")
+				h.logger.Error(feedImportRejectStatusFailedLogMessage, "feed", feed, "error", statusErr, "correlation_id", correlationID)
+				errorResponseForRequest(w, r, http.StatusInternalServerError, feedImportRejectStatusUnrecordedText)
 				return
 			}
 			errorResponseForRequest(w, r, http.StatusBadRequest, feedImportStoreRejectedMessage)

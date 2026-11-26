@@ -24,6 +24,11 @@ const (
 	defaultGitCloneTimeout  = 30 * time.Minute
 	gitSyncLockFileName     = ".packmon-sync.lock"
 	gitSyncLockPollInterval = 25 * time.Millisecond
+
+	gitDepthOneArg     = "--depth=1"
+	gitNoProgressArg   = "--no-progress"
+	gitOriginHEADRef   = "origin/HEAD"
+	gitRevParseCommand = "rev-parse"
 )
 
 var (
@@ -95,7 +100,7 @@ func (g *GitRepo) clone(ctx context.Context) error {
 	// admin-visible error. Without it a timed-out clone reports a kilobyte
 	// of "Updating files: 3% (12265/351744)" instead of its actual cause.
 	err := g.runWithTimeout(ctx, g.cloneTimeout(), parent,
-		"clone", "--depth=1", "--single-branch", "--no-progress", g.URL, filepath.Base(g.Dir),
+		"clone", gitDepthOneArg, "--single-branch", gitNoProgressArg, g.URL, filepath.Base(g.Dir),
 	)
 	if err != nil {
 		// A clone killed by the deadline leaves a partial checkout that
@@ -123,10 +128,10 @@ func (g *GitRepo) removePartialClone() {
 // pull fetches and resets to the latest remote HEAD. We use fetch+reset
 // rather than plain pull to handle force-pushes gracefully.
 func (g *GitRepo) pull(ctx context.Context) error {
-	if err := g.run(ctx, g.Dir, "fetch", "--depth=1", "--no-progress", "origin"); err != nil {
+	if err := g.run(ctx, g.Dir, "fetch", gitDepthOneArg, gitNoProgressArg, "origin"); err != nil {
 		return err
 	}
-	return g.run(ctx, g.Dir, "reset", "--hard", "origin/HEAD")
+	return g.run(ctx, g.Dir, "reset", "--hard", gitOriginHEADRef)
 }
 
 // headHash reads the current HEAD commit hash.
@@ -138,7 +143,7 @@ func (g *GitRepo) headHash(ctx context.Context) (string, error) {
 	var stdout bytes.Buffer
 	cmdCtx, cancel := g.commandContext(ctx)
 	defer cancel()
-	cmd := gitCommand(cmdCtx, "rev-parse", "HEAD")
+	cmd := gitCommand(cmdCtx, gitRevParseCommand, "HEAD")
 	cmd.Dir = g.Dir
 	cmd.Stdout = &stdout
 	var stderr bytes.Buffer
@@ -147,9 +152,9 @@ func (g *GitRepo) headHash(ctx context.Context) (string, error) {
 
 	if err := cmd.Run(); err != nil {
 		if cmdCtx.Err() != nil {
-			return "", gitCommandError([]string{"rev-parse", "HEAD"}, cmdCtx.Err(), stdout.String(), stderr.String())
+			return "", gitCommandError([]string{gitRevParseCommand, "HEAD"}, cmdCtx.Err(), stdout.String(), stderr.String())
 		}
-		return "", gitCommandError([]string{"rev-parse", "HEAD"}, err, stdout.String(), stderr.String())
+		return "", gitCommandError([]string{gitRevParseCommand, "HEAD"}, err, stdout.String(), stderr.String())
 	}
 
 	return strings.TrimSpace(stdout.String()), nil
@@ -196,7 +201,7 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context, sinceCommit string) 
 	defer releaseSyncLock()
 
 	// Step 1: fetch latest from origin.
-	if err := g.run(ctx, g.Dir, "fetch", "--depth=1", "--no-progress", "origin"); err != nil {
+	if err := g.run(ctx, g.Dir, "fetch", gitDepthOneArg, gitNoProgressArg, "origin"); err != nil {
 		return "", nil, fmt.Errorf("git fetch: %w", err)
 	}
 
@@ -211,7 +216,7 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context, sinceCommit string) 
 		cmdCtx, cancel := g.commandContext(ctx)
 		defer cancel()
 		// #nosec G204 -- command is fixed to git; sinceCommit is a stored commit hash and origin/HEAD is fixed.
-		cmd := gitCommand(cmdCtx, "diff", "--name-only", sinceCommit, "origin/HEAD")
+		cmd := gitCommand(cmdCtx, "diff", "--name-only", sinceCommit, gitOriginHEADRef)
 		cmd.Dir = g.Dir
 		cmd.Stdout = &stdout
 		var stderr bytes.Buffer
@@ -222,7 +227,7 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context, sinceCommit string) 
 			if cmdCtx.Err() != nil {
 				diffErr = cmdCtx.Err()
 			}
-			diffErr = gitCommandError([]string{"diff", "--name-only", sinceCommit, "origin/HEAD"}, diffErr, stdout.String(), stderr.String())
+			diffErr = gitCommandError([]string{"diff", "--name-only", sinceCommit, gitOriginHEADRef}, diffErr, stdout.String(), stderr.String())
 			log.Warn("git diff against import baseline failed, delta sync not available",
 				slog.String("error", SafeDiagnosticError(diffErr)),
 			)
@@ -247,7 +252,7 @@ func (g *GitRepo) PullWithChangedFiles(ctx context.Context, sinceCommit string) 
 	}
 
 	// Step 4: reset to origin/HEAD.
-	if err := g.run(ctx, g.Dir, "reset", "--hard", "origin/HEAD"); err != nil {
+	if err := g.run(ctx, g.Dir, "reset", "--hard", gitOriginHEADRef); err != nil {
 		return "", nil, fmt.Errorf("git reset: %w", err)
 	}
 

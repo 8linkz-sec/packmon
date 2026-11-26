@@ -6,6 +6,14 @@ import (
 	"github.com/8linkz-sec/packmon/internal/domain"
 )
 
+// Lowercase ecosystem lookup keys shared by the OSV, GHSA and OpenSSF
+// mappings. OSVBucketEcosystems spells its case-sensitive bucket directory
+// names separately.
+const (
+	cratesIOKey      = "crates.io"
+	githubActionsKey = "github actions"
+)
+
 // MapOSVEcosystem maps an OSV ecosystem string to our canonical Ecosystem
 // enum. OSV uses title-case names like "npm", "PyPI", "Go", etc.
 // Returns the mapped ecosystem and true if recognised, or "" and false
@@ -23,7 +31,7 @@ var osvEcosystemMap = map[string]domain.Ecosystem{
 	"pypi":           domain.EcosystemPyPI,
 	"go":             domain.EcosystemGo,
 	"maven":          domain.EcosystemMaven,
-	"crates.io":      domain.EcosystemCargo,
+	cratesIOKey:      domain.EcosystemCargo,
 	"nuget":          domain.EcosystemNuGet,
 	"packagist":      domain.EcosystemComposer,
 	"rubygems":       domain.EcosystemGem,
@@ -32,7 +40,7 @@ var osvEcosystemMap = map[string]domain.Ecosystem{
 	"swifturl":       domain.EcosystemSwiftPM,
 	"hex":            domain.EcosystemHex,
 	"cran":           domain.EcosystemCRAN,
-	"github actions": domain.EcosystemGitHubActions,
+	githubActionsKey: domain.EcosystemGitHubActions,
 	"cargo":          domain.EcosystemCargo, // alias used by some sources
 	"composer":       domain.EcosystemComposer,
 	"gem":            domain.EcosystemGem,
@@ -57,12 +65,12 @@ var ghsaEcosystemMap = map[string]domain.Ecosystem{
 	"composer":       domain.EcosystemComposer,
 	"packagist":      domain.EcosystemComposer,
 	"rubygems":       domain.EcosystemGem,
-	"crates.io":      domain.EcosystemCargo,
+	cratesIOKey:      domain.EcosystemCargo,
 	"pub":            domain.EcosystemPub,
 	"swifturl":       domain.EcosystemSwiftPM,
 	"hex":            domain.EcosystemHex,
 	"actions":        domain.EcosystemGitHubActions,
-	"github actions": domain.EcosystemGitHubActions,
+	githubActionsKey: domain.EcosystemGitHubActions,
 	"rust":           domain.EcosystemCargo,
 	"cargo":          domain.EcosystemCargo,
 }
@@ -82,7 +90,7 @@ var openssfEcosystemMap = map[string]domain.Ecosystem{
 	"pip":            domain.EcosystemPyPI,
 	"go":             domain.EcosystemGo,
 	"maven":          domain.EcosystemMaven,
-	"crates.io":      domain.EcosystemCargo,
+	cratesIOKey:      domain.EcosystemCargo,
 	"cargo":          domain.EcosystemCargo,
 	"rust":           domain.EcosystemCargo,
 	"nuget":          domain.EcosystemNuGet,
@@ -96,7 +104,7 @@ var openssfEcosystemMap = map[string]domain.Ecosystem{
 	"swifturl":       domain.EcosystemSwiftPM,
 	"cran":           domain.EcosystemCRAN,
 	"actions":        domain.EcosystemGitHubActions,
-	"github actions": domain.EcosystemGitHubActions,
+	githubActionsKey: domain.EcosystemGitHubActions,
 }
 
 // OSVBucketEcosystems returns the list of OSV ecosystem names (as used

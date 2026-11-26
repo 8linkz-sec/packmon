@@ -38,6 +38,8 @@ const (
 	// defaultRateLimit is the max calls per hour (Socket.dev free tier).
 	defaultRateLimit = 500
 
+	jobCompleteFailedLogMessage = "failed to complete job"
+
 	// defaultPollInterval is how often the worker checks for new jobs.
 	defaultPollInterval = 10 * time.Second
 
@@ -352,7 +354,7 @@ func (w *Worker) processNextJobWithoutReset(ctx context.Context) bool {
 		completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
 		defer cancel()
 		if completeErr := completeQueueJob(completeCtx, w.store, job, checkErr, w.metrics); completeErr != nil {
-			w.logger.Error("failed to complete job",
+			w.logger.Error(jobCompleteFailedLogMessage,
 				slog.Int("job_id", job.ID),
 				slog.String("error", completeErr.Error()),
 			)
@@ -372,7 +374,7 @@ func (w *Worker) processNextJobWithoutReset(ctx context.Context) bool {
 		completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
 		defer cancel()
 		if completeErr := completeQueueJob(completeCtx, w.store, job, checkErr, w.metrics); completeErr != nil {
-			w.logger.Error("failed to complete job",
+			w.logger.Error(jobCompleteFailedLogMessage,
 				slog.Int("job_id", job.ID),
 				slog.String("error", completeErr.Error()),
 			)
@@ -407,7 +409,7 @@ func (w *Worker) processNextJobWithoutReset(ctx context.Context) bool {
 	completeCtx, cancel := context.WithTimeout(context.Background(), completeTimeout)
 	defer cancel()
 	if completeErr := completeQueueJob(completeCtx, w.store, job, checkErr, w.metrics); completeErr != nil {
-		w.logger.Error("failed to complete job",
+		w.logger.Error(jobCompleteFailedLogMessage,
 			slog.Int("job_id", job.ID),
 			slog.String("error", completeErr.Error()),
 		)

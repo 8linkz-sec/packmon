@@ -20,6 +20,10 @@ import (
 const (
 	defaultCLIConfigFile             = ".packmon.yaml"
 	maxAutoProjectCLIConfigFileBytes = 64 * 1024
+	// localDBFileName is the SQLite file name inside the local DB directory.
+	localDBFileName = "packmon.db"
+	// notSetPlaceholder is shown for an empty configuration value.
+	notSetPlaceholder = "(not set)"
 )
 
 var errCLIConfigAdditionalYAMLDocument = errors.New("config must contain at most one YAML document")
@@ -783,14 +787,14 @@ var errLocalDBHomeUnknown = errors.New("resolve local database path: the home di
 // PACKMON_DB_PATH, then db.path from trusted config, then ~/.packmon/db.
 func resolveLocalDBPath() (string, error) {
 	if p := strings.TrimSpace(os.Getenv("PACKMON_DB_PATH")); p != "" {
-		return filepath.Join(p, "packmon.db"), nil
+		return filepath.Join(p, localDBFileName), nil
 	}
 	cfg, _, err := loadCurrentCLIConfig()
 	if err != nil {
 		return "", err
 	}
 	if cfg != nil && strings.TrimSpace(cfg.DB.Path) != "" {
-		return filepath.Join(cfg.DB.Path, "packmon.db"), nil
+		return filepath.Join(cfg.DB.Path, localDBFileName), nil
 	}
 	return defaultLocalDBPath()
 }
@@ -802,7 +806,7 @@ func defaultLocalDBPath() (string, error) {
 	if err != nil || strings.TrimSpace(home) == "" {
 		return "", errLocalDBHomeUnknown
 	}
-	return filepath.Join(home, ".packmon", "db", "packmon.db"), nil
+	return filepath.Join(home, ".packmon", "db", localDBFileName), nil
 }
 
 func (c *cliConfig) findRepo(name string) *cliRepoConfig {
@@ -831,7 +835,7 @@ func defaultFailSeverity() domain.Severity {
 func maskSecret(value string) string {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "(not set)"
+		return notSetPlaceholder
 	}
 	if len(value) <= 4 {
 		return "****"

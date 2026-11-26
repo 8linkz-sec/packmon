@@ -2,6 +2,10 @@ package dockerimage
 
 import "strings"
 
+// dockerHubDisplayRegistry is the user-facing name of the Docker Hub registry,
+// whose API host is dockerHubRegistryHost.
+const dockerHubDisplayRegistry = "docker.io"
+
 // Ref is a normalized Docker image reference. Name is the Packmon display
 // identity; Registry/Repository/Reference are used for registry API calls.
 type Ref struct {
@@ -100,23 +104,23 @@ func stripNameTag(namePart string) string {
 }
 
 func normalizeRegistryAndRepository(namePart string) (string, string, string, bool) {
-	registry := "registry-1.docker.io"
-	displayRegistry := "docker.io"
+	registry := dockerHubRegistryHost
+	displayRegistry := dockerHubDisplayRegistry
 	repository := namePart
 	first := firstPathComponent(namePart)
 	if hasExplicitRegistry(first) {
 		registry = first
 		displayRegistry = first
 		repository = strings.TrimPrefix(namePart[len(first):], "/")
-		if first == "docker.io" {
-			registry = "registry-1.docker.io"
-			displayRegistry = "docker.io"
+		if first == dockerHubDisplayRegistry {
+			registry = dockerHubRegistryHost
+			displayRegistry = dockerHubDisplayRegistry
 		}
 	}
 	if repository == "" {
 		return "", "", "", false
 	}
-	if registry == "registry-1.docker.io" && !strings.Contains(repository, "/") {
+	if registry == dockerHubRegistryHost && !strings.Contains(repository, "/") {
 		repository = "library/" + repository
 	}
 	return registry, displayRegistry, repository, true

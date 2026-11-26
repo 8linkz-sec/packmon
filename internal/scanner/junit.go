@@ -11,6 +11,10 @@ import (
 	"github.com/8linkz-sec/packmon/internal/plural"
 )
 
+// junitParseErrorsName names the JUnit suite and test-case class of parse
+// diagnostics.
+const junitParseErrorsName = "packmon.parse-errors"
+
 // JUnit XML types for CI/CD integration (GitLab Test Reports, Jenkins, etc.).
 
 type junitTestsuites struct {
@@ -155,7 +159,7 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 		for i, pe := range parseErrors {
 			cases = append(cases, junitTestcase{
 				Name:      fmt.Sprintf("parse error %d", i+1),
-				Classname: "packmon.parse-errors",
+				Classname: junitParseErrorsName,
 				Time:      "0.000",
 				Error: &junitError{
 					Message: pe,
@@ -167,7 +171,7 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 		if summary := ParseDiagnosticsOmittedSummary(omittedParseErrors); summary != "" {
 			cases = append(cases, junitTestcase{
 				Name:      "parse diagnostics omitted",
-				Classname: "packmon.parse-errors",
+				Classname: junitParseErrorsName,
 				Time:      "0.000",
 				Error: &junitError{
 					Message: summary,
@@ -177,7 +181,7 @@ func (jw *JUnitWriter) buildJUnit(result *domain.ScanResult) junitTestsuites {
 			})
 		}
 		suites = append(suites, junitTestsuite{
-			Name:   "packmon.parse-errors",
+			Name:   junitParseErrorsName,
 			Tests:  len(cases),
 			Errors: len(cases),
 			Time:   "0.000",

@@ -103,7 +103,7 @@ func (h *AdminHandler) listQueueJobsPage(ctx context.Context, status string, off
 func (h *AdminHandler) HandleQueuePurge(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "queue_purge",
-		bootstrapRedirectPath: "/admin/queue",
+		bootstrapRedirectPath: adminQueuePath,
 	}); !ok {
 		return
 	}
@@ -127,7 +127,7 @@ func (h *AdminHandler) HandleQueuePurge(w http.ResponseWriter, r *http.Request) 
 func (h *AdminHandler) HandleQueuePriorityUpdate(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "queue_priority_update",
-		bootstrapRedirectPath: "/admin/queue",
+		bootstrapRedirectPath: adminQueuePath,
 	}); !ok {
 		return
 	}
@@ -180,7 +180,7 @@ func (h *AdminHandler) HandleQueueRetry(w http.ResponseWriter, r *http.Request) 
 func (h *AdminHandler) HandleQueueClear(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "queue_clear",
-		bootstrapRedirectPath: "/admin/queue",
+		bootstrapRedirectPath: adminQueuePath,
 	}); !ok {
 		return
 	}
@@ -223,7 +223,7 @@ func (h *AdminHandler) handleQueueJobAction(
 ) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            auditAction,
-		bootstrapRedirectPath: "/admin/queue",
+		bootstrapRedirectPath: adminQueuePath,
 	}); !ok {
 		return
 	}
@@ -491,21 +491,21 @@ func adminQueueJobViews(jobs []adminQueueJob) []adminQueueJobView {
 func adminQueueStatusClass(status string) string {
 	status, ok := db.NormalizeRefreshStatus(status)
 	if !ok {
-		return "pm-badge-status-error"
+		return badgeClassError
 	}
 	switch status {
 	case db.RefreshStatusPending:
-		return "pm-badge-status-pending"
+		return badgeClassPending
 	case db.RefreshStatusProcessing:
-		return "pm-badge-status-running"
+		return badgeClassRunning
 	case db.RefreshStatusDone:
-		return "pm-badge-status-healthy"
+		return badgeClassHealthy
 	case db.RefreshStatusPaused:
-		return "pm-badge-status-disabled"
+		return badgeClassDisabled
 	case db.RefreshStatusError:
-		return "pm-badge-status-error"
+		return badgeClassError
 	default:
-		return "pm-badge-status-error"
+		return badgeClassError
 	}
 }
 
@@ -537,7 +537,7 @@ func adminQueueURLWithOffset(status string, offset int, includeZeroOffset bool) 
 		parts = append(parts, "offset="+strconv.Itoa(max(offset, 0)))
 	}
 	if len(parts) == 0 {
-		return "/admin/queue"
+		return adminQueuePath
 	}
 	return "/admin/queue?" + strings.Join(parts, "&")
 }

@@ -38,6 +38,14 @@ const (
 	apiKeyCreateNonceFlashKey = "api_key_create_nonce"
 	adminAuditPageSize        = 100
 	adminAPIKeyPageSize       = 100
+
+	adminFeedsTemplate = "admin/feeds.html"
+)
+
+// Catalog messages of audit-log write failures on the keys and settings pages.
+var (
+	keysAuditLogMessage     = web.Message("admin.keys.error.audit_log")
+	settingsAuditLogMessage = web.Message("admin.settings.error.audit_log")
 )
 
 // apiKeyExpiryPreset is a selectable duration in the create form's dropdown.
@@ -88,7 +96,7 @@ func (h *AdminHandler) requireAdmin(w http.ResponseWriter, r *http.Request) *aut
 
 func (h *AdminHandler) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 	h.sm.Delete(w, r)
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerCacheControl, cacheControlNoStore)
 	target := auth.AdminLoginRedirectTarget(r)
 	if isHTMXRequest(r) {
 		w.Header().Set("HX-Redirect", target)
@@ -114,13 +122,13 @@ func (h *AdminHandler) requireBootstrapPasswordRotated(w http.ResponseWriter, r 
 
 	h.auditLogBestEffort(r, "bootstrap_rotation_required", map[string]string{"path": logsafe.RequestPathLabel(r.URL.Path)})
 	if isHTMXRequest(r) && strings.HasPrefix(redirectPath, "/admin/feeds") {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set(headerContentType, contentTypeHTML)
 		w.WriteHeader(http.StatusForbidden)
-		if renderErr := h.renderer.RenderPartial(w, "admin/feeds.html", "admin-feed-flash", adminFeedFlashData{
+		if renderErr := h.renderer.RenderPartial(w, adminFeedsTemplate, "admin-feed-flash", adminFeedFlashData{
 			Error: bootstrapRotationRequiredMessage,
 		}); renderErr != nil {
 			h.logger.Error("admin feeds: bootstrap flash render failed", h.adminLogAttrs(r, "error", renderErr)...)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		}
 		return false
 	}
@@ -175,10 +183,10 @@ func (h *AdminHandler) HandleAdminFeeds(w http.ResponseWriter, r *http.Request) 
 			"Message": r.URL.Query().Get("msg"),
 			"Error":   r.URL.Query().Get("err"),
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := h.renderer.RenderPartial(w, "admin/feeds.html", "admin-feed-flash", data); err != nil {
+		w.Header().Set(headerContentType, contentTypeHTML)
+		if err := h.renderer.RenderPartial(w, adminFeedsTemplate, "admin-feed-flash", data); err != nil {
 			h.logger.Error("admin feeds: partial flash render failed", h.adminLogAttrs(r, "error", err)...)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		}
 		return
 	}
@@ -194,10 +202,10 @@ func (h *AdminHandler) HandleAdminFeeds(w http.ResponseWriter, r *http.Request) 
 			"Feeds":               h.adminFeedRows(feeds),
 			"FeedStatusLoadError": feedStatusLoadError,
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := h.renderer.RenderPartial(w, "admin/feeds.html", "admin-feed-runtime", data); err != nil {
+		w.Header().Set(headerContentType, contentTypeHTML)
+		if err := h.renderer.RenderPartial(w, adminFeedsTemplate, "admin-feed-runtime", data); err != nil {
 			h.logger.Error("admin feeds: partial runtime render failed", h.adminLogAttrs(r, "error", err)...)
-			http.Error(w, "internal server error", http.StatusInternalServerError)
+			http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		}
 		return
 	}
@@ -242,7 +250,7 @@ func (h *AdminHandler) HandleAdminFeeds(w http.ResponseWriter, r *http.Request) 
 	}
 	addAdminBootstrapPageState(data, h.adminBootstrapPageState(ctx, r, sess, "admin feeds"))
 
-	h.renderAdmin(w, "admin/feeds.html", data)
+	h.renderAdmin(w, adminFeedsTemplate, data)
 }
 
 func (row adminFeedRow) StatusReason() string {
@@ -306,7 +314,7 @@ func (h *AdminHandler) HandleAdminScans(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerCacheControl, cacheControlNoStore)
 	web.HandleScansWithOptions(h.store, h.renderer, h.logger, web.ScansOptions{
 		ActiveNav:    "admin",
 		AdminPage:    true,
@@ -317,14 +325,14 @@ func (h *AdminHandler) HandleAdminScans(w http.ResponseWriter, r *http.Request) 
 
 func apiKeyMutationErrorMessage(err error, fallback string) string {
 	if errors.Is(err, db.ErrAdminAuditLog) {
-		return web.Message("admin.keys.error.audit_log")
+		return keysAuditLogMessage
 	}
 	return fallback
 }
 
 func settingsMutationErrorMessage(err error, fallback string) string {
 	if errors.Is(err, db.ErrAdminAuditLog) {
-		return web.Message("admin.settings.error.audit_log")
+		return settingsAuditLogMessage
 	}
 	return fallback
 }
@@ -491,13 +499,13 @@ func (k apiKeyView) StatusLabel() string {
 func (k apiKeyView) StatusClass() string {
 	switch {
 	case k.DeletedAt != nil:
-		return "pm-badge-status-disabled"
+		return badgeClassDisabled
 	case k.RevokedAt != nil:
-		return "pm-badge-status-error"
+		return badgeClassError
 	case k.IsExpired():
-		return "pm-badge-status-warning"
+		return badgeClassWarning
 	default:
-		return "pm-badge-status-healthy"
+		return badgeClassHealthy
 	}
 }
 
@@ -505,7 +513,7 @@ func (k apiKeyView) StatusClass() string {
 func (h *AdminHandler) HandleKeyCreate(w http.ResponseWriter, r *http.Request) {
 	sess, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "api_key_create",
-		bootstrapRedirectPath: "/admin/keys",
+		bootstrapRedirectPath: adminKeysPath,
 	})
 	if !ok {
 		return
@@ -699,7 +707,7 @@ func (h *AdminHandler) requireAPIKeyCreateStepUp(w http.ResponseWriter, r *http.
 				"reason": "too many failed attempts",
 			}); err != nil {
 				h.releaseLockoutAudit(claim)
-				redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name)
+				redirectAPIKeyCreateError(w, r, keysAuditLogMessage, name)
 				return false
 			}
 		}
@@ -719,7 +727,7 @@ func (h *AdminHandler) requireAPIKeyCreateStepUp(w http.ResponseWriter, r *http.
 		if err := h.auditLog(r, "api_key_create_failed", map[string]string{
 			"reason": "invalid current password",
 		}); err != nil {
-			redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.audit_log"), name)
+			redirectAPIKeyCreateError(w, r, keysAuditLogMessage, name)
 			return false
 		}
 		redirectAPIKeyCreateError(w, r, web.Message("admin.keys.error.current_password_incorrect"), name)
@@ -767,7 +775,7 @@ type apiKeyMutation struct {
 func (h *AdminHandler) handleAPIKeyMutation(w http.ResponseWriter, r *http.Request, mutation apiKeyMutation) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            mutation.auditAction,
-		bootstrapRedirectPath: "/admin/keys",
+		bootstrapRedirectPath: adminKeysPath,
 	}); !ok {
 		return
 	}
@@ -807,7 +815,7 @@ func adminKeysURL(offset int, param, value string) string {
 		values.Set("offset", strconv.Itoa(offset))
 	}
 	if len(values) == 0 {
-		return "/admin/keys"
+		return adminKeysPath
 	}
 	return "/admin/keys?" + values.Encode()
 }
@@ -952,13 +960,13 @@ type auditLogView struct {
 func (v auditLogView) ActionClass() string {
 	switch v.Action {
 	case "login_success":
-		return "pm-badge-status-configured"
+		return badgeClassConfigured
 	case "login_failed":
-		return "pm-badge-status-error"
+		return badgeClassError
 	case "login_lockout":
-		return "pm-badge-status-warning"
+		return badgeClassWarning
 	default:
-		return "pm-badge-status-default"
+		return badgeClassDefault
 	}
 }
 
@@ -976,11 +984,11 @@ func adminAuditIntegrityLabel(status string) string {
 func adminAuditIntegrityClass(status string) string {
 	switch status {
 	case db.AdminAuditIntegrityVerified:
-		return "pm-badge-status-healthy"
+		return badgeClassHealthy
 	case db.AdminAuditIntegrityBroken:
-		return "pm-badge-status-error"
+		return badgeClassError
 	default:
-		return "pm-badge-status-default"
+		return badgeClassDefault
 	}
 }
 
@@ -1252,11 +1260,11 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 				"reason": "too many failed attempts",
 			}); err != nil {
 				h.releaseLockoutAudit(claim)
-				http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.audit_log")), http.StatusSeeOther)
+				http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(settingsAuditLogMessage), http.StatusSeeOther)
 				return
 			}
 		}
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.too_many_attempts")), http.StatusSeeOther)
+		http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(web.Message("admin.settings.error.password.too_many_attempts")), http.StatusSeeOther)
 		return
 	}
 
@@ -1265,18 +1273,18 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 	confirmPassword := r.PostForm.Get("confirm_password")
 
 	if newPassword != confirmPassword {
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.mismatch")), http.StatusSeeOther)
+		http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(web.Message("admin.settings.error.password.mismatch")), http.StatusSeeOther)
 		return
 	}
 
 	if err := auth.ValidateAdminPassword(newPassword); err != nil {
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(adminPasswordPolicyMessage(err)), http.StatusSeeOther)
+		http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(adminPasswordPolicyMessage(err)), http.StatusSeeOther)
 		return
 	}
 
 	adminAuth, err := h.store.GetAdminAuth(r.Context())
 	if err != nil || adminAuth == nil {
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.verify_current")), http.StatusSeeOther)
+		http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(web.Message("admin.settings.error.password.verify_current")), http.StatusSeeOther)
 		return
 	}
 
@@ -1287,10 +1295,10 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 		if err := h.auditLog(r, "password_change_failed", map[string]string{
 			"reason": "invalid current password",
 		}); err != nil {
-			http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.audit_log")), http.StatusSeeOther)
+			http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(settingsAuditLogMessage), http.StatusSeeOther)
 			return
 		}
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.current_incorrect")), http.StatusSeeOther)
+		http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(web.Message("admin.settings.error.password.current_incorrect")), http.StatusSeeOther)
 		return
 	}
 
@@ -1298,17 +1306,17 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 		if err := h.auditLog(r, "password_change_failed", map[string]string{
 			"reason": "new password reused current password",
 		}); err != nil {
-			http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.audit_log")), http.StatusSeeOther)
+			http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(settingsAuditLogMessage), http.StatusSeeOther)
 			return
 		}
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.reused")), http.StatusSeeOther)
+		http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(web.Message("admin.settings.error.password.reused")), http.StatusSeeOther)
 		return
 	}
 
 	newHash, err := auth.HashPassword(newPassword)
 	if err != nil {
 		h.logger.Error("admin settings: failed to hash new password", h.adminLogAttrs(r, "error", err)...)
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.update")), http.StatusSeeOther)
+		http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(web.Message("admin.settings.error.password.update")), http.StatusSeeOther)
 		return
 	}
 
@@ -1317,10 +1325,10 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 	if updateErr != nil {
 		h.logger.Error("admin settings: failed to update password", h.adminLogAttrs(r, "error", updateErr)...)
 		if errors.Is(updateErr, db.ErrAdminAuthConflict) {
-			http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(web.Message("admin.settings.error.password.current_incorrect")), http.StatusSeeOther)
+			http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(web.Message("admin.settings.error.password.current_incorrect")), http.StatusSeeOther)
 			return
 		}
-		http.Redirect(w, r, "/admin/settings?err="+url.QueryEscape(settingsMutationErrorMessage(updateErr, web.Message("admin.settings.error.password.update"))), http.StatusSeeOther)
+		http.Redirect(w, r, adminSettingsErrorRedirectPrefix+url.QueryEscape(settingsMutationErrorMessage(updateErr, web.Message("admin.settings.error.password.update"))), http.StatusSeeOther)
 		return
 	}
 
@@ -1348,7 +1356,7 @@ func (h *AdminHandler) HandlePasswordChange(w http.ResponseWriter, r *http.Reque
 	if err != nil || replacement == nil {
 		invalidateAdminSessions()
 		h.logger.Error("admin settings: failed to rotate admin session", h.adminLogAttrs(r, "error", err)...)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		return
 	}
 	sessionRotationComplete = true
@@ -1365,14 +1373,14 @@ func (h *AdminHandler) renderAdminWithStatus(w http.ResponseWriter, tmpl string,
 	if status == 0 {
 		status = http.StatusOK
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerContentType, contentTypeHTML)
+	w.Header().Set(headerCacheControl, cacheControlNoStore)
 	if status != http.StatusOK {
 		w.WriteHeader(status)
 	}
 	if err := h.renderer.Render(w, tmpl, data); err != nil {
 		h.logger.Error("admin render failed", "template", tmpl, "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 	}
 }
 

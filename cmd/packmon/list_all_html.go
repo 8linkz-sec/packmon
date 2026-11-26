@@ -15,6 +15,10 @@ import (
 
 const listAllHTMLCopyConfirmationVisibleMs = "5000"
 
+// listAllHTMLStatusUpdateAvailable is the package status of an outdated or
+// fixable package in the HTML list-all report.
+const listAllHTMLStatusUpdateAvailable = "Update available"
+
 type listAllHTMLPackageRow struct {
 	Name                 string
 	Installed            string
@@ -325,7 +329,7 @@ func listAllHTMLPackageInfo(info listAllPackageReport, rows []listAllRow, findin
 func listAllHTMLUpdateRows(rows []listAllRow, findingStatuses map[string]listAllHTMLFindingState) []int {
 	out := make([]int, 0)
 	for i, row := range rows {
-		if listAllHTMLPackageStatus(row, findingStatuses) == "Update available" {
+		if listAllHTMLPackageStatus(row, findingStatuses) == listAllHTMLStatusUpdateAvailable {
 			out = append(out, i)
 		}
 	}
@@ -422,12 +426,12 @@ func listAllHTMLPackageVulnerability(row listAllRow, vulnSet map[string]struct{}
 func listAllHTMLPackageStatus(row listAllRow, findingStatuses map[string]listAllHTMLFindingState) string {
 	if state := findingStatuses[listAllRowFindingKey(row)]; state.Status != "" {
 		if state.Status == "Vulnerable" && listAllHTMLVulnerabilityHasUpdatePath(row, state) {
-			return "Update available"
+			return listAllHTMLStatusUpdateAvailable
 		}
 		return state.Status
 	}
 	if strings.EqualFold(strings.TrimSpace(row.Update), "yes") {
-		return "Update available"
+		return listAllHTMLStatusUpdateAvailable
 	}
 	if strings.EqualFold(strings.TrimSpace(row.Update), "local") {
 		return "Local build"
@@ -533,7 +537,7 @@ func listAllHTMLCopyContext(field string, row listAllRow) (string, string) {
 }
 
 func listAllHTMLStatusClass(status string) string {
-	if status == "Update available" {
+	if status == listAllHTMLStatusUpdateAvailable {
 		return "status-update"
 	}
 	return ""

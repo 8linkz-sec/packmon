@@ -53,6 +53,13 @@ const (
 // error names tables, columns and database detail, so it stays in the logs.
 const feedImportStoreRejectedMessage = "feed import contains values the store cannot accept"
 
+// Validation and decode error texts of the feed import bodies.
+const (
+	epssImportNoScoreMessage          = "epss import entries must contain at least one score"
+	feedImportInvalidFieldTypeMessage = "json body has invalid field type"
+	feedImportMalformedJSONMessage    = "malformed JSON body"
+)
+
 var cveIDPattern = regexp.MustCompile(`^CVE-\d{4}-\d{4,}$`)
 
 type feedImportValidationError struct {
@@ -722,7 +729,7 @@ func (h *FeedImportHandler) importEPSS(ctx context.Context, feed string, req *ep
 
 func (h *FeedImportHandler) importNormalizedEPSS(ctx context.Context, feed string, entries []db.EPSSEntry, statusInput *feedSyncStatusInput, audit db.FeedImportAuditBuilder) (*importResponse, error) {
 	if len(entries) == 0 {
-		return nil, feedImportValidationErrorf("epss import entries must contain at least one score")
+		return nil, feedImportValidationErrorf(epssImportNoScoreMessage)
 	}
 	status, err := importStatusFromInput(feed, statusInput, len(entries), len(entries))
 	if err != nil {
@@ -781,7 +788,7 @@ func (h *FeedImportHandler) importEPSSRequest(ctx context.Context, feed string, 
 			return nil, streamErr
 		}
 		if entriesTotal == 0 {
-			return nil, feedImportValidationErrorf("epss import entries must contain at least one score")
+			return nil, feedImportValidationErrorf(epssImportNoScoreMessage)
 		}
 		// Validate the complete, defaulted status before the store commits the
 		// snapshot: a status that only fails once the streamed entry count is
@@ -1227,13 +1234,13 @@ func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName st
 	}
 	if tok == nil {
 		if options.rejectNullContainers {
-			return nil, 0, feedImportControlledDecodeError(bodyName, "json body has invalid field type")
+			return nil, 0, feedImportControlledDecodeError(bodyName, feedImportInvalidFieldTypeMessage)
 		}
 		return nil, 0, requireNoTrailingImportJSON(dec, bodyName)
 	}
 	open, ok := tok.(json.Delim)
 	if !ok || open != '{' {
-		return nil, 0, feedImportControlledDecodeError(bodyName, "json body has invalid field type")
+		return nil, 0, feedImportControlledDecodeError(bodyName, feedImportInvalidFieldTypeMessage)
 	}
 
 	var statusInput *feedSyncStatusInput
@@ -1246,7 +1253,7 @@ func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName st
 		}
 		key, ok := keyToken.(string)
 		if !ok {
-			return nil, entriesTotal, feedImportControlledDecodeError(bodyName, "malformed JSON body")
+			return nil, entriesTotal, feedImportControlledDecodeError(bodyName, feedImportMalformedJSONMessage)
 		}
 		switch key {
 		case "entries":
@@ -1283,7 +1290,7 @@ func streamImportEntriesObject[Raw, Normalized any](r *http.Request, bodyName st
 	}
 	closeDelim, ok := closeToken.(json.Delim)
 	if !ok || closeDelim != '}' {
-		return nil, entriesTotal, feedImportControlledDecodeError(bodyName, "malformed JSON body")
+		return nil, entriesTotal, feedImportControlledDecodeError(bodyName, feedImportMalformedJSONMessage)
 	}
 	if err := requireNoTrailingImportJSON(dec, bodyName); err != nil {
 		return nil, entriesTotal, err
@@ -1298,13 +1305,13 @@ func streamImportEntriesArray[Raw, Normalized any](dec *json.Decoder, bodyName s
 	}
 	if tok == nil {
 		if options.rejectNullContainers {
-			return 0, feedImportControlledDecodeError(bodyName, "json body has invalid field type")
+			return 0, feedImportControlledDecodeError(bodyName, feedImportInvalidFieldTypeMessage)
 		}
 		return 0, nil
 	}
 	open, ok := tok.(json.Delim)
 	if !ok || open != '[' {
-		return 0, feedImportControlledDecodeError(bodyName, "json body has invalid field type")
+		return 0, feedImportControlledDecodeError(bodyName, feedImportInvalidFieldTypeMessage)
 	}
 
 	total := 0
@@ -1348,7 +1355,7 @@ func streamImportEntriesArray[Raw, Normalized any](dec *json.Decoder, bodyName s
 	}
 	closeDelim, ok := closeToken.(json.Delim)
 	if !ok || closeDelim != ']' {
-		return total, feedImportControlledDecodeError(bodyName, "malformed JSON body")
+		return total, feedImportControlledDecodeError(bodyName, feedImportMalformedJSONMessage)
 	}
 	if err := flush(); err != nil {
 		return total, err
@@ -1392,7 +1399,7 @@ func normalizeCISAKEVImportIDs(ids []string, clearMissing bool) ([]string, error
 
 func normalizeEPSSImportEntries(entries []epssImportEntry) ([]db.EPSSEntry, error) {
 	if len(entries) == 0 {
-		return nil, feedImportValidationErrorf("epss import entries must contain at least one score")
+		return nil, feedImportValidationErrorf(epssImportNoScoreMessage)
 	}
 	return normalizeEPSSImportEntriesBatch(entries, 0)
 }

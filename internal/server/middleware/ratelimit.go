@@ -35,7 +35,11 @@ type bucket struct {
 	lastSeen time.Time
 }
 
-const rateLimiterShardCount = 64
+const (
+	rateLimiterShardCount = 64
+	// rateLimitExceededMessage is the JSON error text of a 429 response.
+	rateLimitExceededMessage = "rate limit exceeded"
+)
 
 type rateLimiterShard struct {
 	mu      sync.Mutex
@@ -188,7 +192,7 @@ func rateLimitMiddleware(rl *rateLimiter, logger *slog.Logger) func(http.Handler
 					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
 					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
 				)
-				writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				writeJSONError(w, http.StatusTooManyRequests, rateLimitExceededMessage)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -213,7 +217,7 @@ func authenticatedAPIKeyRateLimitMiddleware(rl *rateLimiter, logger *slog.Logger
 					slog.String("path", logsafe.RequestPathLabel(r.URL.Path)),
 					slog.String("correlation_id", CorrelationIDFromContext(r.Context())),
 				)
-				writeJSONError(w, http.StatusTooManyRequests, "rate limit exceeded")
+				writeJSONError(w, http.StatusTooManyRequests, rateLimitExceededMessage)
 				return
 			}
 			next.ServeHTTP(w, r)

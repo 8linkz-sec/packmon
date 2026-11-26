@@ -99,11 +99,11 @@ func (s *Store) CountScansByDay(_ context.Context, days int) ([]db.DailyScanStat
 	byDay := make(map[string]*db.DailyScanStats, days)
 	for i := 0; i < days; i++ {
 		day := startDay.AddDate(0, 0, i)
-		byDay[day.Format("2006-01-02")] = &db.DailyScanStats{Date: day}
+		byDay[day.Format(time.DateOnly)] = &db.DailyScanStats{Date: day}
 	}
 
 	for _, entry := range s.scanLogs {
-		key := entry.ScannedAt.UTC().Format("2006-01-02")
+		key := entry.ScannedAt.UTC().Format(time.DateOnly)
 		row, ok := byDay[key]
 		if !ok {
 			continue
@@ -114,7 +114,7 @@ func (s *Store) CountScansByDay(_ context.Context, days int) ([]db.DailyScanStat
 
 	out := make([]db.DailyScanStats, 0, days)
 	for i := 0; i < days; i++ {
-		day := startDay.AddDate(0, 0, i).Format("2006-01-02")
+		day := startDay.AddDate(0, 0, i).Format(time.DateOnly)
 		out = append(out, *byDay[day])
 	}
 	return out, nil

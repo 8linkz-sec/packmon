@@ -119,6 +119,15 @@ type listAllScopeSummary struct {
 	Count int
 }
 
+// Finding type labels of the list-all report that several functions compare.
+const (
+	listAllTypeSupplyChain    = "Supply-chain"
+	listAllTypeReputationInfo = "Reputation info"
+)
+
+// ansiReset ends an ANSI-colored terminal span.
+const ansiReset = "\033[0m"
+
 var (
 	resolveDockerImageStatusFn  = resolveDockerImageStatusWithDigestResolver
 	inspectLocalDockerDigestsFn = inspectListAllLocalDockerDigests
@@ -1010,15 +1019,15 @@ func listAllTerminalSeverity(severity domain.Severity, noColor bool) string {
 	}
 	switch severity {
 	case domain.SeverityCritical:
-		return "\033[1m\033[31m" + text + "\033[0m"
+		return "\033[1m\033[31m" + text + ansiReset
 	case domain.SeverityHigh:
-		return "\033[31m" + text + "\033[0m"
+		return "\033[31m" + text + ansiReset
 	case domain.SeverityMedium:
-		return "\033[33m" + text + "\033[0m"
+		return "\033[33m" + text + ansiReset
 	case domain.SeverityLow:
-		return "\033[36m" + text + "\033[0m"
+		return "\033[36m" + text + ansiReset
 	default:
-		return "\033[37m" + text + "\033[0m"
+		return "\033[37m" + text + ansiReset
 	}
 }
 
@@ -1159,14 +1168,14 @@ func listAllFindingAction(row listAllFindingRow) string {
 	switch row.Type {
 	case "Malicious":
 		return "Remove package"
-	case "Supply-chain":
+	case listAllTypeSupplyChain:
 		if strings.EqualFold(strings.TrimSpace(row.RiskType), "Malware history") {
 			return "Review history"
 		}
 		return "Review package"
 	case "Lifecycle":
 		return "Review lifecycle"
-	case "Reputation info":
+	case listAllTypeReputationInfo:
 		return "Review history"
 	case "Vulnerability":
 		return "Review advisory"
@@ -1384,10 +1393,10 @@ var listAllFindingSectionDefs = []struct {
 	class string
 }{
 	{"Malicious", "Malicious", "s-mal"},
-	{"Supply-chain", "Supply-Chain / EOL", "s-sce"},
+	{listAllTypeSupplyChain, "Supply-Chain / EOL", "s-sce"},
 	{"Vulnerability", "Vulnerabilities", "s-vuln"},
 	{"Lifecycle", "Lifecycle Findings", "s-life"},
-	{"Reputation info", "Reputation info", "s-life"},
+	{listAllTypeReputationInfo, "Reputation info", "s-life"},
 }
 
 func listAllFindingSections(rows []listAllFindingRow) []listAllFindingSection {
@@ -1452,13 +1461,13 @@ func sortListAllFindingRows(rows []listAllFindingRow) {
 
 func listAllFindingTypeLabel(f domain.Finding) string {
 	if domain.FindingIsInformational(f) {
-		return "Reputation info"
+		return listAllTypeReputationInfo
 	}
 	switch f.Type {
 	case domain.FindingTypeMalicious:
 		return "Malicious"
 	case domain.FindingTypeSupplyChainRisk:
-		return "Supply-chain"
+		return listAllTypeSupplyChain
 	case domain.FindingTypeVulnerability:
 		return "Vulnerability"
 	case domain.FindingTypeLifecycle:

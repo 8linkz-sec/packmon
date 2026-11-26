@@ -32,6 +32,8 @@ type adminPostGate struct {
 
 var (
 	failedFeedConfigLoadMessage    = web.Message("admin.feeds.error.load_config")
+	feedConfigAuditLogMessage      = web.Message("admin.feeds.error.audit_log")
+	unknownFeedMessage             = web.Message("admin.feeds.error.unknown_feed")
 	adminInvalidRequestMessage     = web.Message("admin.form.error.invalid_request")
 	adminInvalidFormMessage        = web.Message("admin.form.error.invalid_payload")
 	errInvalidFeedMode             = errors.New(web.Message("admin.feeds.error.invalid_mode"))
@@ -98,28 +100,28 @@ func adminPostRedirectPath(r *http.Request, gate adminPostGate) string {
 		return gate.bootstrapRedirectPath
 	}
 	if r == nil || r.URL == nil {
-		return "/admin/"
+		return adminRootPath
 	}
 	path := r.URL.Path
 	switch {
 	case strings.HasPrefix(path, "/admin/feeds/"):
-		return "/admin/feeds"
+		return adminFeedsPath
 	case strings.HasPrefix(path, "/admin/queue/"):
-		return "/admin/queue"
+		return adminQueuePath
 	case strings.HasPrefix(path, "/admin/keys/"):
-		return "/admin/keys"
+		return adminKeysPath
 	case strings.HasPrefix(path, "/admin/advisories/"):
-		return "/admin/advisories"
+		return adminAdvisoriesPath
 	case strings.HasPrefix(path, "/admin/settings/"):
-		return "/admin/settings"
+		return adminSettingsPath
 	default:
-		return "/admin/"
+		return adminRootPath
 	}
 }
 
 func redirectAdminFormError(w http.ResponseWriter, r *http.Request, path, message string) {
-	if path == "" || !strings.HasPrefix(path, "/admin/") || strings.HasPrefix(path, "//") {
-		path = "/admin/"
+	if path == "" || !strings.HasPrefix(path, adminRootPath) || strings.HasPrefix(path, "//") {
+		path = adminRootPath
 	}
 	redirectAdminError(w, r, path, message)
 }
@@ -128,7 +130,7 @@ func redirectAdminFormError(w http.ResponseWriter, r *http.Request, path, messag
 func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "feed_config_save",
-		bootstrapRedirectPath: "/admin/feeds",
+		bootstrapRedirectPath: adminFeedsPath,
 	}); !ok {
 		return
 	}
@@ -165,10 +167,10 @@ func (h *AdminHandler) HandleFeedConfigSave(w http.ResponseWriter, r *http.Reque
 	}
 
 	if appliedRuntime {
-		http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape(web.Message("admin.feeds.flash.saved_applied")), http.StatusSeeOther)
+		http.Redirect(w, r, adminFeedsMessageRedirectPrefix+url.QueryEscape(web.Message("admin.feeds.flash.saved_applied")), http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape(web.Message("admin.feeds.flash.saved")), http.StatusSeeOther)
+	http.Redirect(w, r, adminFeedsMessageRedirectPrefix+url.QueryEscape(web.Message("admin.feeds.flash.saved")), http.StatusSeeOther)
 }
 
 func desiredFeedSettingsRedirectError(err error) string {
@@ -392,14 +394,14 @@ func sameRuntimeFeedSettings(a, b config.FeedSettings) bool {
 func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "feed_config_reset",
-		bootstrapRedirectPath: "/admin/feeds",
+		bootstrapRedirectPath: adminFeedsPath,
 	}); !ok {
 		return
 	}
 
 	feedName := config.NormalizeFeedName(r.PostForm.Get("feed_name"))
 	if _, ok := h.cfg.FeedSettings(feedName); !ok {
-		redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.unknown_feed"), feedName)
+		redirectAdminFeedsError(w, r, unknownFeedMessage, feedName)
 		return
 	}
 	if r.PostForm.Get("confirm_reset") != "on" {
@@ -410,7 +412,7 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 	previous, err := h.store.GetFeedConfig(r.Context(), feedName)
 	if err != nil {
 		h.logger.Error("admin feeds: failed to load previous config", h.adminLogAttrs(r, "feed", feedName, "error", err)...)
-		redirectAdminFeedsError(w, r, web.Message("admin.feeds.error.load_config"), feedName)
+		redirectAdminFeedsError(w, r, failedFeedConfigLoadMessage, feedName)
 		return
 	}
 	if err := checkFeedConfigFormRevision(r.PostForm, previous); err != nil {
@@ -422,7 +424,7 @@ func (h *AdminHandler) HandleFeedConfigReset(w http.ResponseWriter, r *http.Requ
 		redirectAdminFeedsError(w, r, errMsg, feedName)
 		return
 	}
-	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape(web.Message("admin.feeds.flash.reset_applied")), http.StatusSeeOther)
+	http.Redirect(w, r, adminFeedsMessageRedirectPrefix+url.QueryEscape(web.Message("admin.feeds.flash.reset_applied")), http.StatusSeeOther)
 }
 
 // resetAndPersistFeedConfig applies the startup defaults to the runtime,
@@ -468,7 +470,7 @@ func (h *AdminHandler) resetAndPersistFeedConfig(r *http.Request, feedName strin
 			return web.Message("admin.feeds.error.save_conflict")
 		}
 		if errors.Is(err, db.ErrAdminAuditLog) {
-			return web.Message("admin.feeds.error.audit_log")
+			return feedConfigAuditLogMessage
 		}
 		return web.Message("admin.feeds.error.reset_persist")
 	}
@@ -499,7 +501,7 @@ func adminFeedsRedirectURL(key, message, feedName string) string {
 func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "feed_sync_trigger",
-		bootstrapRedirectPath: "/admin/feeds",
+		bootstrapRedirectPath: adminFeedsPath,
 	}); !ok {
 		return
 	}
@@ -507,7 +509,7 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 	feedName := config.NormalizeFeedName(r.PostForm.Get("feed_name"))
 	feed, ok := h.cfg.FeedSettings(feedName)
 	if !ok {
-		h.respondFeedSyncResult(w, r, "", web.Message("admin.feeds.error.unknown_feed"), http.StatusBadRequest, false)
+		h.respondFeedSyncResult(w, r, "", unknownFeedMessage, http.StatusBadRequest, false)
 		return
 	}
 	if !feed.SupportsManualSync {
@@ -529,7 +531,7 @@ func (h *AdminHandler) HandleFeedSyncNow(w http.ResponseWriter, r *http.Request)
 		})
 	})
 	if err != nil {
-		h.respondFeedSyncResult(w, r, "", web.Message("admin.feeds.error.audit_log"), http.StatusInternalServerError, false)
+		h.respondFeedSyncResult(w, r, "", feedConfigAuditLogMessage, http.StatusInternalServerError, false)
 		return
 	}
 	if !started {
@@ -656,7 +658,7 @@ func (h *AdminHandler) respondFeedSyncResult(w http.ResponseWriter, r *http.Requ
 		http.Redirect(w, r, "/admin/feeds?err="+url.QueryEscape(errMsg), http.StatusSeeOther)
 		return
 	}
-	http.Redirect(w, r, "/admin/feeds?msg="+url.QueryEscape(message), http.StatusSeeOther)
+	http.Redirect(w, r, adminFeedsMessageRedirectPrefix+url.QueryEscape(message), http.StatusSeeOther)
 }
 
 func isHTMXRequest(r *http.Request) bool {
@@ -670,7 +672,7 @@ func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string)
 	name := config.NormalizeFeedName(feedName)
 	current, ok := h.cfg.FeedSettings(name)
 	if !ok {
-		return config.FeedSettings{}, nil, errors.New(web.Message("admin.feeds.error.unknown_feed"))
+		return config.FeedSettings{}, nil, errors.New(unknownFeedMessage)
 	}
 
 	stored, err := h.store.GetFeedConfig(ctx, name)
@@ -683,7 +685,7 @@ func (h *AdminHandler) desiredFeedSettings(ctx context.Context, feedName string)
 
 	mode, err := config.ParseFeedMode(stored.Mode)
 	if err != nil {
-		return config.FeedSettings{}, nil, fmt.Errorf("%s: invalid persisted mode: %w", web.Message("admin.feeds.error.load_config"), err)
+		return config.FeedSettings{}, nil, fmt.Errorf("%s: invalid persisted mode: %w", failedFeedConfigLoadMessage, err)
 	}
 
 	current.Enabled = stored.Enabled

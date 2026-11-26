@@ -52,6 +52,8 @@ const (
 	// and dependency maps the range resolver reads, but drops readmes,
 	// maintainers and the time map, so it is a fraction of the full packument.
 	npmAbbreviatedMetadataMediaType = "application/vnd.npm.install-v1+json"
+	githubHost                      = "github.com"
+	userAgentHeader                 = "User-Agent"
 )
 
 // lookupSlowCounts counts the packages that serialize behind a dedicated
@@ -583,7 +585,7 @@ func cocoaPodsPublicLatestLookupAllowed(refs []string) bool {
 func composerPublicLatestLookupAllowed(refs []string) bool {
 	return allSourceRefsMatch(refs, func(ref string) bool {
 		switch sourceRefHost(ref) {
-		case "repo.packagist.org", "packagist.org", "api.github.com", "github.com", "gitlab.com", "bitbucket.org":
+		case "repo.packagist.org", "packagist.org", "api.github.com", githubHost, "gitlab.com", "bitbucket.org":
 			return true
 		default:
 			return false
@@ -687,7 +689,7 @@ func githubActionRemote(name string) string {
 	}
 	endpoint := url.URL{
 		Scheme: "https",
-		Host:   "github.com",
+		Host:   githubHost,
 		Path:   "/" + parts[0] + "/" + parts[1] + ".git",
 	}
 	return endpoint.String()
@@ -957,8 +959,8 @@ func registryGetLimitedWithHeaders(ctx context.Context, url string, limit int64,
 		}
 	}
 	// Identify the client unless the caller already supplied its own agent.
-	if req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", packmonRegistryUserAgent())
+	if req.Header.Get(userAgentHeader) == "" {
+		req.Header.Set(userAgentHeader, packmonRegistryUserAgent())
 	}
 
 	resp, err := registryClient.Do(req)
@@ -1204,7 +1206,7 @@ func fetchCratesLatestFromBase(ctx context.Context, baseURL, name string) string
 		return ""
 	}
 	headers := http.Header{}
-	headers.Set("User-Agent", packmonRegistryUserAgent())
+	headers.Set(userAgentHeader, packmonRegistryUserAgent())
 	data, err := registryGetLimitedWithHeaders(ctx, registryEndpoint(baseURL, url.PathEscape(name)), maxRegistryResponseSize, headers)
 	if err != nil {
 		return ""
@@ -1614,7 +1616,7 @@ func isAllowedSwiftPMGitHost(host string) bool {
 func isAllowedSwiftPMGitHostWithConfig(host string, allowedHosts []string) bool {
 	host = strings.ToLower(strings.TrimSpace(host))
 	switch strings.ToLower(strings.TrimSpace(host)) {
-	case "github.com", "gitlab.com", "bitbucket.org":
+	case githubHost, "gitlab.com", "bitbucket.org":
 		return true
 	}
 	for _, allowed := range allowedHosts {

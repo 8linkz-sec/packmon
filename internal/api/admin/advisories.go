@@ -31,6 +31,18 @@ const (
 	adminManualAdvisoryPageSize        = 100
 )
 
+// Catalog messages of manual-advisory form validation.
+var (
+	advisoryRequiredFieldsMessage = web.Message("admin.advisories.error.required_fields")
+	advisoryMaxLengthMessage      = web.Message("admin.advisories.error.max_length")
+)
+
+// advisoryFieldMaxLengthMessage is the per-field validation message of a
+// manual-advisory field longer than limit.
+func advisoryFieldMaxLengthMessage(limit int) string {
+	return web.Message("admin.advisories.field.max_length", limit)
+}
+
 type manualAdvisoryGetter interface {
 	GetManualAdvisory(ctx context.Context, id string) (*db.ManualAdvisory, error)
 }
@@ -205,7 +217,7 @@ func (h *AdminHandler) renderAdminAdvisoriesPage(w http.ResponseWriter, r *http.
 func (h *AdminHandler) HandleAdvisoryCreate(w http.ResponseWriter, r *http.Request) {
 	sess, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "advisory_create",
-		bootstrapRedirectPath: "/admin/advisories",
+		bootstrapRedirectPath: adminAdvisoriesPath,
 	})
 	if !ok {
 		return
@@ -276,19 +288,19 @@ func validateManualAdvisoryInput(input manualAdvisoryInput) (manualAdvisoryInput
 	}
 	if input.Ecosystem == "" {
 		validation.addField("ecosystem", web.Message("admin.advisories.field.ecosystem_required"))
-		validation.setMessage(web.Message("admin.advisories.error.required_fields"))
+		validation.setMessage(advisoryRequiredFieldsMessage)
 	}
 	if input.Name == "" {
 		validation.addField("name", web.Message("admin.advisories.field.name_required"))
-		validation.setMessage(web.Message("admin.advisories.error.required_fields"))
+		validation.setMessage(advisoryRequiredFieldsMessage)
 	}
 	if input.Severity == "" {
 		validation.addField("severity", web.Message("admin.advisories.field.severity_required"))
-		validation.setMessage(web.Message("admin.advisories.error.required_fields"))
+		validation.setMessage(advisoryRequiredFieldsMessage)
 	}
 	if input.Summary == "" {
 		validation.addField("summary", web.Message("admin.advisories.field.summary_required"))
-		validation.setMessage(web.Message("admin.advisories.error.required_fields"))
+		validation.setMessage(advisoryRequiredFieldsMessage)
 	}
 
 	// The HTML <select> only constrains the browser; a direct request can
@@ -314,16 +326,16 @@ func validateManualAdvisoryInput(input manualAdvisoryInput) (manualAdvisoryInput
 		}
 	}
 	if len(input.Name) > ManualAdvisoryNameMaxLength {
-		validation.addField("name", web.Message("admin.advisories.field.max_length", ManualAdvisoryNameMaxLength))
-		validation.setMessage(web.Message("admin.advisories.error.max_length"))
+		validation.addField("name", advisoryFieldMaxLengthMessage(ManualAdvisoryNameMaxLength))
+		validation.setMessage(advisoryMaxLengthMessage)
 	}
 	if len(input.Summary) > ManualAdvisorySummaryMaxLength {
-		validation.addField("summary", web.Message("admin.advisories.field.max_length", ManualAdvisorySummaryMaxLength))
-		validation.setMessage(web.Message("admin.advisories.error.max_length"))
+		validation.addField("summary", advisoryFieldMaxLengthMessage(ManualAdvisorySummaryMaxLength))
+		validation.setMessage(advisoryMaxLengthMessage)
 	}
 	if len(input.Description) > ManualAdvisoryDescriptionMaxLength {
-		validation.addField("description", web.Message("admin.advisories.field.max_length", ManualAdvisoryDescriptionMaxLength))
-		validation.setMessage(web.Message("admin.advisories.error.max_length"))
+		validation.addField("description", advisoryFieldMaxLengthMessage(ManualAdvisoryDescriptionMaxLength))
+		validation.setMessage(advisoryMaxLengthMessage)
 	}
 	if validation.HasErrors() {
 		return input, validation, nil
@@ -440,7 +452,7 @@ func adminAdvisoryURL(offset int, values url.Values) string {
 		out.Set("offset", strconv.Itoa(offset))
 	}
 	if len(out) == 0 {
-		return "/admin/advisories"
+		return adminAdvisoriesPath
 	}
 	return "/admin/advisories?" + out.Encode()
 }
@@ -649,7 +661,7 @@ func (h *AdminHandler) deleteManualAdvisoryWithAudit(r *http.Request, id string,
 func (h *AdminHandler) HandleAdvisoryDelete(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.requireAdminPost(w, r, adminPostGate{
 		csrfAction:            "advisory_delete",
-		bootstrapRedirectPath: "/admin/advisories",
+		bootstrapRedirectPath: adminAdvisoriesPath,
 	}); !ok {
 		return
 	}

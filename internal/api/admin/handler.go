@@ -37,6 +37,27 @@ const (
 	adminLoginAccountKey = "account:admin"
 
 	adminUnconfiguredLoginError = "Admin account has not been configured."
+
+	adminInternalServerErrorText = "internal server error"
+	adminMethodNotAllowedText    = "method not allowed"
+
+	headerContentType   = "Content-Type"
+	contentTypeHTML     = "text/html; charset=utf-8"
+	headerCacheControl  = "Cache-Control"
+	cacheControlNoStore = "no-store"
+)
+
+// Admin page paths used as redirect targets.
+const (
+	adminRootPath       = "/admin/"
+	adminFeedsPath      = "/admin/feeds"
+	adminQueuePath      = "/admin/queue"
+	adminKeysPath       = "/admin/keys"
+	adminAdvisoriesPath = "/admin/advisories"
+	adminSettingsPath   = "/admin/settings"
+
+	adminFeedsMessageRedirectPrefix  = adminFeedsPath + "?msg="
+	adminSettingsErrorRedirectPrefix = adminSettingsPath + "?err="
 )
 
 // loginAttempt tracks failed login attempts for an IP address or the shared
@@ -196,7 +217,7 @@ func (h *AdminHandler) adminCSRFToken(w http.ResponseWriter, r *http.Request, se
 	token, err := csrfToken(sess)
 	if err != nil {
 		h.logger.Error("admin csrf token generation failed", h.adminLogAttrs(r, "scope", scope, "error", err)...)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		return "", false
 	}
 	return token, true
@@ -236,7 +257,7 @@ func (h *AdminHandler) HandleLogin(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		h.processLogin(w, r)
 	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, adminMethodNotAllowedText, http.StatusMethodNotAllowed)
 	}
 }
 
@@ -257,7 +278,7 @@ func (h *AdminHandler) showLoginForm(w http.ResponseWriter, r *http.Request, err
 	sess, err := h.sm.CreateOrReusePreAuth(w, r)
 	if err != nil {
 		h.logger.Error("failed to create login session", h.adminLogAttrs(r, "error", err)...)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		return
 	}
 
@@ -266,8 +287,8 @@ func (h *AdminHandler) showLoginForm(w http.ResponseWriter, r *http.Request, err
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerContentType, contentTypeHTML)
+	w.Header().Set(headerCacheControl, cacheControlNoStore)
 
 	data := map[string]any{
 		"ActiveNav":         "admin",
@@ -278,7 +299,7 @@ func (h *AdminHandler) showLoginForm(w http.ResponseWriter, r *http.Request, err
 	}
 	if err := h.renderer.Render(w, "admin/login.html", data); err != nil {
 		h.logger.Error("failed to render login template", h.adminLogAttrs(r, "error", err)...)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 	}
 }
 
@@ -341,7 +362,7 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	adminAuth, err := h.store.GetAdminAuth(r.Context())
 	if err != nil {
 		h.logger.Error("failed to get admin auth", h.adminLogAttrs(r, "error", err)...)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		return
 	}
 	if adminAuth == nil {
@@ -377,7 +398,7 @@ func (h *AdminHandler) processLogin(w http.ResponseWriter, r *http.Request) {
 	adminSession, err := h.newAdminSession(w, adminAuth.PasswordIsBootstrap)
 	if err != nil || adminSession == nil {
 		h.logger.Error("failed to create admin session", h.adminLogAttrs(r, "error", err)...)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		return
 	}
 
@@ -434,7 +455,7 @@ func adminLoginSuccessRedirect(nextPath string) string {
 // Requires a valid CSRF token to prevent cross-site logout attacks.
 func (h *AdminHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, adminMethodNotAllowedText, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -469,12 +490,12 @@ func (h *AdminHandler) HandleNotFound(w http.ResponseWriter, r *http.Request) {
 	var buf bytes.Buffer
 	if err := h.renderer.Render(&buf, "not_found.html", web.NotFoundData{ActiveNav: "admin"}); err != nil {
 		h.logger.Error("admin not found: render failed", "error", err)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerContentType, contentTypeHTML)
+	w.Header().Set(headerCacheControl, cacheControlNoStore)
 	w.WriteHeader(http.StatusNotFound)
 	_, _ = w.Write(buf.Bytes())
 }
@@ -483,7 +504,7 @@ func (h *AdminHandler) HandleNotFound(w http.ResponseWriter, r *http.Request) {
 // status, and queue summary.
 func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		http.Error(w, adminMethodNotAllowedText, http.StatusMethodNotAllowed)
 		return
 	}
 
@@ -582,8 +603,8 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set(headerContentType, contentTypeHTML)
+	w.Header().Set(headerCacheControl, cacheControlNoStore)
 
 	data := map[string]any{
 		"ActiveNav":               "admin",
@@ -603,7 +624,7 @@ func (h *AdminHandler) HandleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.renderer.Render(w, "admin/dashboard.html", data); err != nil {
 		h.logger.Error("admin dashboard: render failed", h.adminLogAttrs(r, "error", err)...)
-		http.Error(w, "internal server error", http.StatusInternalServerError)
+		http.Error(w, adminInternalServerErrorText, http.StatusInternalServerError)
 	}
 }
 
