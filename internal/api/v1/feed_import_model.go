@@ -1488,9 +1488,9 @@ func validateImportStatusInput(input *feedSyncStatusInput) error {
 	return feedImportValidationErrorf("feed import status %q is not supported", status)
 }
 
-func truncateString(value string, max int) string {
-	if max <= 0 || len(value) <= max {
+func truncateString(value string, maxBytes int) string {
+	if maxBytes <= 0 || len(value) <= maxBytes {
 		return value
 	}
-	return value[:max]
+	return value[:maxBytes]
 }

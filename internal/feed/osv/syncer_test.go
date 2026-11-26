@@ -102,9 +102,9 @@ func (s *osvStoreStub) UpsertFeedSyncStatus(ctx context.Context, status *db.Feed
 	if s.upsertErr != nil {
 		return s.upsertErr
 	}
-	copy := *status
-	s.status = &copy
-	s.statusHistory = append(s.statusHistory, copy)
+	stored := *status
+	s.status = &stored
+	s.statusHistory = append(s.statusHistory, stored)
 	return nil
 }
 
