@@ -387,11 +387,12 @@ func (h *Handler) HandleCheck(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	result, resultBody, ok := h.buildCheckResult(w, r, lookupCtx, start, idempotency.scanID, checkRequest.request.Packages, !idempotency.replay, correlationID)
+	call := &checkCall{parts: &checkRequest, idempotency: idempotency, correlationID: correlationID}
+	result, resultBody, ok := h.buildCheckResult(w, r, lookupCtx, start, call)
 	if !ok {
 		return
 	}
-	if !h.persistCheckScanLog(w, r, lookupCtx, &checkRequest.request, &result, checkRequest.idempotencyKey, idempotency.storedKey, checkRequest.requestDigest, resultBody, idempotency.replay, correlationID) {
+	if !h.persistCheckScanLog(w, r, lookupCtx, call, &result, resultBody) {
 		return
 	}
 	h.cacheCheckResponse(idempotency.storedKey, checkRequest.requestDigest, http.StatusOK, result.DurationMs, resultBody)
@@ -435,6 +436,14 @@ type checkIdempotencyResolution struct {
 	scanID    string
 	replay    bool
 	storedKey string
+}
+
+// checkCall is one parsed POST /api/v1/check request with its resolved
+// idempotency state, as the result-building and logging steps need it.
+type checkCall struct {
+	parts         *checkRequestParts
+	idempotency   checkIdempotencyResolution
+	correlationID string
 }
 
 type checkRequest struct {
@@ -533,8 +542,11 @@ func (h *Handler) resolveCheckIdempotency(w http.ResponseWriter, r *http.Request
 	return resolution, true
 }
 
-func (h *Handler) buildCheckResult(w http.ResponseWriter, r *http.Request, ctx context.Context, start time.Time, scanID string, packages []domain.Package, scheduleReversingLabs bool, correlationID string) (domain.ScanResult, []byte, bool) {
-	collection, err := h.collectFindingsForCheck(ctx, packages, scheduleReversingLabs)
+func (h *Handler) buildCheckResult(w http.ResponseWriter, r *http.Request, ctx context.Context, start time.Time, call *checkCall) (domain.ScanResult, []byte, bool) {
+	packages := call.parts.request.Packages
+	correlationID := call.correlationID
+	// A replayed idempotent request does not schedule ReversingLabs lookups again.
+	collection, err := h.collectFindingsForCheck(ctx, packages, !call.idempotency.replay)
 	if err != nil {
 		h.logger.Error("failed to collect findings", "error", err, "correlation_id", correlationID)
 		checkStoreErrorResponse(w, r, err)
@@ -570,7 +582,7 @@ func (h *Handler) buildCheckResult(w http.ResponseWriter, r *http.Request, ctx c
 	durationMs := time.Since(start).Milliseconds()
 
 	result := domain.ScanResult{
-		ScanID:                scanID,
+		ScanID:                call.idempotency.scanID,
 		Mode:                  domain.ScanModeRemote,
 		ScannedAt:             start.UTC(),
 		DurationMs:            durationMs,
@@ -593,32 +605,40 @@ func (h *Handler) buildCheckResult(w http.ResponseWriter, r *http.Request, ctx c
 	return result, resultBody, true
 }
 
-func (h *Handler) persistCheckScanLog(w http.ResponseWriter, r *http.Request, ctx context.Context, req *domain.ScanRequest, result *domain.ScanResult, rawIdempotencyKey, storedIdempotencyKey, requestDigest string, resultBody []byte, idempotencyReplay bool, correlationID string) bool {
-	if idempotencyReplay {
+func (h *Handler) persistCheckScanLog(w http.ResponseWriter, r *http.Request, ctx context.Context, call *checkCall, result *domain.ScanResult, resultBody []byte) bool {
+	if call.idempotency.replay {
 		return true
 	}
+	rawIdempotencyKey := call.parts.idempotencyKey
 	logCtx, cancelLog := context.WithTimeout(context.WithoutCancel(r.Context()), scanLogInsertTimeout)
 	defer cancelLog()
-	if err := h.logScan(logCtx, result, r, req, correlationID, storedIdempotencyKey, requestDigest, scanResultDigest(resultBody)); err != nil {
-		h.logger.Error("failed to insert scan log", "error", err, "correlation_id", correlationID, "idempotency_key_present", rawIdempotencyKey != "")
+	ids := scanLogIDs{
+		correlationID:  call.correlationID,
+		idempotencyKey: call.idempotency.storedKey,
+		requestDigest:  call.parts.requestDigest,
+		resultDigest:   scanResultDigest(resultBody),
+	}
+	if err := h.logScan(logCtx, result, r, &call.parts.request, ids); err != nil {
+		h.logger.Error("failed to insert scan log", "error", err, "correlation_id", call.correlationID, "idempotency_key_present", rawIdempotencyKey != "")
 		if rawIdempotencyKey != "" {
 			errorResponseForRequest(w, r, http.StatusInternalServerError, "internal error while recording idempotency state")
 			return false
 		}
 		return true
 	}
-	return h.verifyCheckIdempotencyAfterLog(w, r, ctx, storedIdempotencyKey, rawIdempotencyKey, requestDigest, correlationID)
+	return h.verifyCheckIdempotencyAfterLog(w, r, ctx, call)
 }
 
-func (h *Handler) verifyCheckIdempotencyAfterLog(w http.ResponseWriter, r *http.Request, ctx context.Context, storedIdempotencyKey, rawIdempotencyKey, requestDigest, correlationID string) bool {
+func (h *Handler) verifyCheckIdempotencyAfterLog(w http.ResponseWriter, r *http.Request, ctx context.Context, call *checkCall) bool {
+	storedIdempotencyKey := call.idempotency.storedKey
 	if storedIdempotencyKey == "" {
 		return true
 	}
-	if existing, ok, err := h.existingIdempotentScan(ctx, storedIdempotencyKey, rawIdempotencyKey); err != nil {
-		h.logger.Error("failed to verify idempotency key", "error", err, "correlation_id", correlationID)
+	if existing, ok, err := h.existingIdempotentScan(ctx, storedIdempotencyKey, call.parts.idempotencyKey); err != nil {
+		h.logger.Error("failed to verify idempotency key", "error", err, "correlation_id", call.correlationID)
 		checkStoreErrorResponse(w, r, err)
 		return false
-	} else if ok && existing.RequestDigest != "" && existing.RequestDigest != requestDigest {
+	} else if ok && existing.RequestDigest != "" && existing.RequestDigest != call.parts.requestDigest {
 		errorResponseForRequest(w, r, http.StatusConflict, "idempotency key was already used for a different check request")
 		return false
 	}
@@ -867,8 +887,17 @@ func overallFeedStatus(statuses []db.FeedSyncStatus) string {
 	return feedhealth.OverallFeedStatus(statuses, feedhealth.HealthOptions{})
 }
 
+// scanLogIDs are the correlation, idempotency and digest values recorded with
+// a scan log entry.
+type scanLogIDs struct {
+	correlationID  string
+	idempotencyKey string // the stored form of the idempotency key, "" without one
+	requestDigest  string
+	resultDigest   string
+}
+
 // logScan persists a scan log entry for a completed scan.
-func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *http.Request, req *domain.ScanRequest, correlationID, idempotencyKey, requestDigest, resultDigest string) error {
+func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *http.Request, req *domain.ScanRequest, ids scanLogIDs) error {
 	identityMode := h.scanLogIdentityMode
 	if identityMode == "" {
 		identityMode = config.ScanLogIdentityModeFull
@@ -883,10 +912,10 @@ func (h *Handler) logScan(ctx context.Context, result *domain.ScanResult, r *htt
 	if identityMode == config.ScanLogIdentityModeFull {
 		entry.ClientIP = clientIP(r)
 	}
-	entry.CorrelationID = correlationID
-	entry.IdempotencyKey = idempotencyKey
-	entry.RequestDigest = requestDigest
-	entry.ResultDigest = resultDigest
+	entry.CorrelationID = ids.correlationID
+	entry.IdempotencyKey = ids.idempotencyKey
+	entry.RequestDigest = ids.requestDigest
+	entry.ResultDigest = ids.resultDigest
 	// Persist the decision evidence captured with the result. Re-reading the
 	// runtime threshold here could record a value an admin set after the
 	// response was decided.

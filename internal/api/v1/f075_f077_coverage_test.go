@@ -643,20 +643,20 @@ func TestF075DispatchAndAdapterCapabilityGuards(t *testing.T) {
 
 	identityNormalize := func(_ string, _ int, item db.Vulnerability) (db.Vulnerability, error) { return item, nil }
 	baseOptions := feedImportRecordOptions[db.Vulnerability]{normalize: identityNormalize}
-	if _, err := importFeedRecords(context.Background(), newTestFeedImportHandler(&stubStore{}), "osv", nil, []db.Vulnerability{{ID: "GHSA-1"}}, nil, func(int, int) db.AdminAuditEntry { return db.AdminAuditEntry{Action: "feed_import"} }, baseOptions); err == nil {
+	if _, err := importFeedRecords(context.Background(), "osv", nil, []db.Vulnerability{{ID: "GHSA-1"}}, nil, func(int, int) db.AdminAuditEntry { return db.AdminAuditEntry{Action: "feed_import"} }, baseOptions); err == nil {
 		t.Fatal("record import without audited callback error = nil")
 	}
 	baseOptions.auditedImport = func(context.Context, string, []db.Vulnerability, []string, *db.FeedSyncStatus, db.FeedImportAuditBuilder) (int, int, error) {
 		return 0, 0, nil
 	}
-	if _, err := importFeedRecords(context.Background(), newTestFeedImportHandler(&stubStore{}), "osv", nil, []db.Vulnerability{{ID: "GHSA-1"}}, nil, nil, baseOptions); err == nil {
+	if _, err := importFeedRecords(context.Background(), "osv", nil, []db.Vulnerability{{ID: "GHSA-1"}}, nil, nil, baseOptions); err == nil {
 		t.Fatal("record import without audit builder error = nil")
 	}
 	genericErr := errors.New("generic audited import failure")
 	baseOptions.auditedImport = func(context.Context, string, []db.Vulnerability, []string, *db.FeedSyncStatus, db.FeedImportAuditBuilder) (int, int, error) {
 		return 0, 0, genericErr
 	}
-	if _, err := importFeedRecords(context.Background(), newTestFeedImportHandler(&stubStore{}), "osv", nil, []db.Vulnerability{{ID: "GHSA-1"}}, nil, func(int, int) db.AdminAuditEntry { return db.AdminAuditEntry{Action: "feed_import"} }, baseOptions); !errors.Is(err, genericErr) {
+	if _, err := importFeedRecords(context.Background(), "osv", nil, []db.Vulnerability{{ID: "GHSA-1"}}, nil, func(int, int) db.AdminAuditEntry { return db.AdminAuditEntry{Action: "feed_import"} }, baseOptions); !errors.Is(err, genericErr) {
 		t.Fatalf("generic audited import error = %v, want %v", err, genericErr)
 	}
 
